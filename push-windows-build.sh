@@ -59,33 +59,10 @@ echo ""
 echo ">>> [3/5] 暂存打包所需文件..."
 cd "$PROJECT_ROOT"
 
-# Windows 打包必要文件：
-#   - .github/workflows/build-windows.yml  构建工作流
-#   - .gitignore                           仓库过滤规则
-#   - split-tool/package.json              npm 元数据和脚本
-#   - split-tool/package-lock.json         锁定的依赖版本
-#   - split-tool/tsconfig.json             TypeScript 配置
-#   - split-tool/vite.config.ts            Vite 构建配置
-#   - split-tool/index.html                首页入口
-#   - split-tool/modules/                  模块 HTML 入口
-#   - split-tool/src/                      全部 TypeScript 源码
-#   - split-tool/src-tauri/                Rust 源码、Tauri 配置、图标
-#   - split-tool/start-dev.sh             Tauri devUrl 前置命令
-#   - split-tool/scripts/                  版本检查等辅助脚本
-
-git add \
-  .github/workflows/build-windows.yml \
-  .gitignore \
-  split-tool/package.json \
-  split-tool/package-lock.json \
-  split-tool/tsconfig.json \
-  split-tool/vite.config.ts \
-  split-tool/index.html \
-  split-tool/modules/ \
-  split-tool/src/ \
-  split-tool/src-tauri/ \
-  split-tool/start-dev.sh \
-  split-tool/scripts/
+# 使用 git add -A 自动暂存所有变更（新增/修改/删除）
+# .gitignore 已排除 node_modules、target、dist 等大体积无关文件
+# 新增任何源码/文档/配置文件都会自动被包含
+git add -A
 
 echo ""
 echo ">>> [4/5] 将要提交的文件："
