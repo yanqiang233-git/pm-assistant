@@ -38,6 +38,7 @@ jobs:
           workspaces: split-tool/src-tauri
 
       - name: Validate version consistency
+        shell: bash
         run: |
           node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); const tauri=JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8')); const cargo=fs.readFileSync('src-tauri/Cargo.toml','utf8'); const cargoMatch=cargo.match(/^version\s*=\s*\"([^\"]+)\"/m); if(!cargoMatch){throw new Error('Cargo.toml version not found');} const versions=[pkg.version, tauri.version, cargoMatch[1]]; if(new Set(versions).size!==1){throw new Error('Version mismatch: '+versions.join(' | '));} console.log('Version check passed:', versions[0]);"
 
