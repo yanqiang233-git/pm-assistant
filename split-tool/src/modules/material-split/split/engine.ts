@@ -3,10 +3,22 @@ import {
   RatioTemplate, PreviewSummary, PKG_NAME_PATTERN
 } from '../types';
 import {
-  yuanToInt, intToYuan, qtyToInt, intToQty,
-  splitByRatio, splitAverage, splitByFixedAmounts,
-  adjustLastItem
+  adjustLastBigIntItem,
+  bigIntToDecimalString,
+  decimalToBigInt,
+  getMaxDecimalScale,
+  normalizeDecimalString,
+  splitAverageBigInt,
+  splitBigIntByRatio
 } from './precision';
+
+function getNormalizedDecimal(row: ExcelRow, field: string): string {
+  return normalizeDecimalString(row[field]) ?? '0';
+}
+
+function sumBigInt(values: bigint[]): bigint {
+  return values.reduce((sum, value) => sum + value, 0n);
+}
 
 /**
  * 执行全部拆分
@@ -70,8 +82,13 @@ export function executeSplit(
     }
 
     // ── 输出预分配行（自动补分包编号）──
-    const preAllocAmountPerPkg = new Array(n).fill(0);
-    const preAllocQtyPerPkg = new Array(n).fill(0);
+    const amountDecimals = fbRows.map(row => getNormalizedDecimal(row, '估算总价（元）'));
+    const qtyDecimals = fbRows.map(row => getNormalizedDecimal(row, '数量'));
+    const amountScale = getMaxDecimalScale([...amountDecimals, ...(config.fixedAmounts ?? [])]);
+    const qtyScale = getMaxDecimalScale(qtyDecimals);
+
+    const preAllocAmountPerPkg = new Array<bigint>(n).fill(0n);
+    const preAllocQtyPerPkg = new Array<bigint>(n).fill(0n);
     for (const row of preAllocRows) {
       const match = PKG_NAME_PATTERN.exec(String(row['分包名称']).trim())!;
       const pkgNum = parseInt(match[1]);
@@ -79,42 +96,39 @@ export function executeSplit(
       const newRow: SplitRow = { ...row };
       newRow['分包编号'] = `JS${pkgNum * 100}`;
       result.push(newRow);
-      preAllocAmountPerPkg[pkgIdx] += yuanToInt(Number(row['估算总价（元）'] ?? 0));
-      preAllocQtyPerPkg[pkgIdx] += qtyToInt(Number(row['数量'] ?? 0));
+      preAllocAmountPerPkg[pkgIdx] += decimalToBigInt(getNormalizedDecimal(row, '估算总价（元）'), amountScale);
+      preAllocQtyPerPkg[pkgIdx] += decimalToBigInt(getNormalizedDecimal(row, '数量'), qtyScale);
     }
 
     // 若该分标无待拆行，跳过后续拆分逻辑
     if (toSplitRows.length === 0) continue;
 
-    // ── 计算分标整数总量 ──
-    const fbTotalAmountFloat = fbRows.reduce(
-      (s, r) => s + Number(r['估算总价（元）'] ?? 0), 0
-    );
-    const fbTotalQtyFloat = fbRows.reduce(
-      (s, r) => s + Number(r['数量'] ?? 0), 0
-    );
-    const fbTotalAmount = yuanToInt(fbTotalAmountFloat);
-    const fbTotalQty = qtyToInt(fbTotalQtyFloat);
+    // ── 计算分标精确总量 ──
+    const fbTotalAmount = sumBigInt(amountDecimals.map(value => decimalToBigInt(value, amountScale)));
+    const fbTotalQty = sumBigInt(qtyDecimals.map(value => decimalToBigInt(value, qtyScale)));
 
     // ── 计算每包目标金额/数量 ──
-    let packageTargetAmounts: number[];
-    let packageTargetQtys: number[];
+    let packageTargetAmounts: bigint[];
+    let packageTargetQtys: bigint[];
     const method: SplitMethod = config.splitMethod;
 
     if (method === 'average') {
-      packageTargetAmounts = splitAverage(fbTotalAmount, n);
-      packageTargetQtys = splitAverage(fbTotalQty, n);
+      packageTargetAmounts = splitAverageBigInt(fbTotalAmount, n);
+      packageTargetQtys = splitAverageBigInt(fbTotalQty, n);
     } else if (method === 'ratio' && config.templateId) {
       const tpl = templateMap.get(config.templateId);
       const ratios = tpl?.ratios ?? Array(n).fill(1);
-      packageTargetAmounts = splitByRatio(fbTotalAmount, ratios);
-      packageTargetQtys = splitByRatio(fbTotalQty, ratios);
+      packageTargetAmounts = splitBigIntByRatio(fbTotalAmount, ratios);
+      packageTargetQtys = splitBigIntByRatio(fbTotalQty, ratios);
     } else if (method === 'fixedAmount' && config.fixedAmounts) {
-      packageTargetAmounts = splitByFixedAmounts(fbTotalAmount, config.fixedAmounts);
-      packageTargetQtys = splitByFixedAmounts(fbTotalQty, config.fixedAmounts);
+      packageTargetAmounts = config.fixedAmounts.map(value => decimalToBigInt(value, amountScale));
+      if (sumBigInt(packageTargetAmounts) !== fbTotalAmount) {
+        throw new Error(`分标"${fbName}"的指定金额总和与原始总额不一致`);
+      }
+      packageTargetQtys = splitBigIntByRatio(fbTotalQty, packageTargetAmounts);
     } else {
-      packageTargetAmounts = splitAverage(fbTotalAmount, n);
-      packageTargetQtys = splitAverage(fbTotalQty, n);
+      packageTargetAmounts = splitAverageBigInt(fbTotalAmount, n);
+      packageTargetQtys = splitAverageBigInt(fbTotalQty, n);
     }
 
     // ── 计算每包剩余预算 ──
@@ -127,10 +141,10 @@ export function executeSplit(
 
     // 检查预占是否超标
     for (let i = 0; i < n; i++) {
-      if (remainBudgetAmount[i] < 0) {
+      if (remainBudgetAmount[i] < 0n) {
         throw new Error(
-          `分标"${fbName}"包${i + 1}的预分配金额(${intToYuan(preAllocAmountPerPkg[i])})` +
-          `超过目标金额(${intToYuan(packageTargetAmounts[i])})`
+          `分标"${fbName}"包${i + 1}的预分配金额(${bigIntToDecimalString(preAllocAmountPerPkg[i], amountScale)})` +
+          `超过目标金额(${bigIntToDecimalString(packageTargetAmounts[i], amountScale)})`
         );
       }
     }
@@ -138,19 +152,19 @@ export function executeSplit(
     // ── 层级①：转换层兜底 ──
     // 各行独立 round 后累加可能 ≠ 总和 round，调整最后一行吸收差值
     const rowAmountsInt = toSplitRows.map(
-      r => yuanToInt(Number(r['估算总价（元）'] ?? 0))
+      row => decimalToBigInt(getNormalizedDecimal(row, '估算总价（元）'), amountScale)
     );
     const rowQtysInt = toSplitRows.map(
-      r => qtyToInt(Number(r['数量'] ?? 0))
+      row => decimalToBigInt(getNormalizedDecimal(row, '数量'), qtyScale)
     );
-    const toSplitTotalAmount = remainBudgetAmount.reduce((a, b) => a + b, 0);
-    const toSplitTotalQty = remainBudgetQty.reduce((a, b) => a + b, 0);
-    adjustLastItem(rowAmountsInt, toSplitTotalAmount);
-    adjustLastItem(rowQtysInt, toSplitTotalQty);
+    const toSplitTotalAmount = sumBigInt(remainBudgetAmount);
+    const toSplitTotalQty = sumBigInt(remainBudgetQty);
+    adjustLastBigIntItem(rowAmountsInt, toSplitTotalAmount);
+    adjustLastBigIntItem(rowQtysInt, toSplitTotalQty);
 
     // ── 拆分待拆行 ──
-    const accumulatedPerPkg = new Array(n).fill(0);
-    const accumulatedQtyPerPkg = new Array(n).fill(0);
+    const accumulatedPerPkg = new Array<bigint>(n).fill(0n);
+    const accumulatedQtyPerPkg = new Array<bigint>(n).fill(0n);
 
     for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
       const row = toSplitRows[rowIdx];
@@ -158,8 +172,8 @@ export function executeSplit(
       const rowAmountInt = rowAmountsInt[rowIdx];
       const rowQtyInt = rowQtysInt[rowIdx];
 
-      let priceShares: number[];
-      let qtyShares: number[];
+      let priceShares: bigint[];
+      let qtyShares: bigint[];
 
       if (isLastRow) {
         // 层级③：尾行用减法兜底 → 确保每包总和严格等于目标
@@ -172,19 +186,20 @@ export function executeSplit(
       } else {
         // 层级②：行内拆分（splitByRatio/splitAverage 保证 sum = total）
         if (method === 'average') {
-          priceShares = splitAverage(rowAmountInt, n);
-          qtyShares = splitAverage(rowQtyInt, n);
+          priceShares = splitAverageBigInt(rowAmountInt, n);
+          qtyShares = splitAverageBigInt(rowQtyInt, n);
         } else if (method === 'ratio' && config.templateId) {
           const tpl = templateMap.get(config.templateId);
           const ratios = tpl?.ratios ?? Array(n).fill(1);
-          priceShares = splitByRatio(rowAmountInt, ratios);
-          qtyShares = splitByRatio(rowQtyInt, ratios);
+          priceShares = splitBigIntByRatio(rowAmountInt, ratios);
+          qtyShares = splitBigIntByRatio(rowQtyInt, ratios);
         } else if (method === 'fixedAmount' && config.fixedAmounts) {
-          priceShares = splitByFixedAmounts(rowAmountInt, config.fixedAmounts);
-          qtyShares = splitByFixedAmounts(rowQtyInt, config.fixedAmounts);
+          const weights = config.fixedAmounts.map(value => decimalToBigInt(value, amountScale));
+          priceShares = splitBigIntByRatio(rowAmountInt, weights);
+          qtyShares = splitBigIntByRatio(rowQtyInt, weights);
         } else {
-          priceShares = splitAverage(rowAmountInt, n);
-          qtyShares = splitAverage(rowQtyInt, n);
+          priceShares = splitAverageBigInt(rowAmountInt, n);
+          qtyShares = splitAverageBigInt(rowQtyInt, n);
         }
       }
 
@@ -192,8 +207,8 @@ export function executeSplit(
         const newRow: SplitRow = { ...row };
         newRow['分包名称'] = `包${i + 1}`;
         newRow['分包编号'] = `JS${(i + 1) * 100}`;
-        newRow['估算总价（元）'] = intToYuan(priceShares[i]);
-        newRow['数量'] = intToQty(qtyShares[i]);
+        newRow['估算总价（元）'] = bigIntToDecimalString(priceShares[i], amountScale);
+        newRow['数量'] = bigIntToDecimalString(qtyShares[i], qtyScale);
         result.push(newRow);
         accumulatedPerPkg[i] += priceShares[i];
         accumulatedQtyPerPkg[i] += qtyShares[i];
@@ -202,11 +217,18 @@ export function executeSplit(
 
     // ── 全局断言：验证拆分后金额总和 ──
     const outputAmountTotal =
-      preAllocAmountPerPkg.reduce((a: number, b: number) => a + b, 0) +
-      accumulatedPerPkg.reduce((a: number, b: number) => a + b, 0);
+      sumBigInt(preAllocAmountPerPkg) + sumBigInt(accumulatedPerPkg);
     if (outputAmountTotal !== fbTotalAmount) {
       throw new Error(
-        `内部错误：分标"${fbName}"拆分后金额总和(${outputAmountTotal})≠原始总和(${fbTotalAmount})`
+        `内部错误：分标"${fbName}"拆分后金额总和(${bigIntToDecimalString(outputAmountTotal, amountScale)})≠原始总和(${bigIntToDecimalString(fbTotalAmount, amountScale)})`
+      );
+    }
+
+    const outputQtyTotal =
+      sumBigInt(preAllocQtyPerPkg) + sumBigInt(accumulatedQtyPerPkg);
+    if (outputQtyTotal !== fbTotalQty) {
+      throw new Error(
+        `内部错误：分标"${fbName}"拆分后数量总和(${bigIntToDecimalString(outputQtyTotal, qtyScale)})≠原始总和(${bigIntToDecimalString(fbTotalQty, qtyScale)})`
       );
     }
   }

@@ -1,6 +1,28 @@
 import * as XLSX from 'xlsx';
 import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate } from '../types';
-import { splitAverage, intToYuan } from '../split/precision';
+import {
+  bigIntToDecimalString,
+  compareDecimalStrings,
+  decimalToBigInt,
+  getMaxDecimalScale,
+  normalizeDecimalString,
+  splitAverageBigInt,
+  subtractDecimalStrings,
+  sumDecimalStrings
+} from '../split/precision';
+
+function applyMoneyNumberFormat(ws: XLSX.WorkSheet, rowCount: number, maxPkg: number): void {
+  const moneyCols = [1, ...Array.from({ length: maxPkg }, (_, index) => 4 + index)];
+  for (let rowIndex = 1; rowIndex < rowCount; rowIndex++) {
+    for (const colIndex of moneyCols) {
+      const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+      const cell = ws[cellRef];
+      if (cell?.t === 'n') {
+        cell.z = '0.0000';
+      }
+    }
+  }
+}
 
 /** 通过 Tauri 原生对话框保存文件，浏览器环境回退到 Blob 下载 */
 async function saveToFile(data: Uint8Array, filename: string): Promise<void> {
@@ -90,8 +112,8 @@ const LABEL_TO_METHOD: Record<string, SplitMethod> = {
 export async function downloadSplitConfigTemplate(
   configs: FenbiaoConfig[],
   defaultMethod: SplitMethod,
-  fenbiaoTotals: Map<string, number>,
-  templates: RatioTemplate[]
+  templates: RatioTemplate[],
+  exactFenbiaoAmountTotals: Record<string, string> = {}
 ): Promise<Uint8Array> {
   // 计算最大分包数以确定列数
   const maxPkg = Math.max(...configs.map(c => c.packageCount), 1);
@@ -103,14 +125,16 @@ export async function downloadSplitConfigTemplate(
   for (const c of configs) {
     if (c.packageCount < 1) continue;
     const method = c.overridden ? c.splitMethod : defaultMethod;
-    const totalFen = fenbiaoTotals.get(c.name) || 0;
-    const row: unknown[] = [c.name, intToYuan(totalFen), c.packageCount, METHOD_LABELS[method]];
+    const exactTotal = exactFenbiaoAmountTotals[c.name] ?? '0';
+    const row: unknown[] = [c.name, exactTotal, c.packageCount, METHOD_LABELS[method]];
 
     if (method === 'average') {
       // 自动带出每包金额
-      const shares = splitAverage(totalFen, c.packageCount);
+      const scale = getMaxDecimalScale([exactTotal]);
+      const shares = splitAverageBigInt(decimalToBigInt(exactTotal, scale), c.packageCount)
+        .map(share => bigIntToDecimalString(share, scale));
       for (let i = 0; i < maxPkg; i++) {
-        row.push(i < c.packageCount ? intToYuan(shares[i]) : '');
+        row.push(i < c.packageCount ? shares[i] : '');
       }
     } else if (method === 'ratio') {
       // 如果已关联模板，带出比例；否则留空
@@ -128,7 +152,7 @@ export async function downloadSplitConfigTemplate(
       // 如果已设金额，带出；否则留空
       for (let i = 0; i < maxPkg; i++) {
         if (i < c.packageCount && c.fixedAmounts?.[i] != null) {
-          row.push(intToYuan(c.fixedAmounts[i]));
+          row.push(c.fixedAmounts[i]);
         } else if (i < c.packageCount) {
           row.push('');
         } else {
@@ -140,6 +164,7 @@ export async function downloadSplitConfigTemplate(
   }
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
+  applyMoneyNumberFormat(ws, wsData.length, maxPkg);
   // 设置列宽
   ws['!cols'] = [{ wch: 30 }, { wch: 18 }, { wch: 10 }, { wch: 12 }];
   for (let i = 0; i < maxPkg; i++) ws['!cols']!.push({ wch: 14 });
@@ -154,7 +179,8 @@ export interface SplitConfigRow {
   name: string;
   packageCount: number;
   method: SplitMethod;
-  values: number[];   // 比例为百分数×100(万分比), 金额为×10000(整数), 平均分为×10000(整数)
+  ratioValues?: number[];
+  amountValues?: string[];
   rawMethod: string;
 }
 
@@ -168,7 +194,7 @@ export interface SplitConfigImportResult {
 export function readSplitConfigTemplate(
   file: File,
   fenbiaoNames: string[],
-  fenbiaoTotals: Map<string, number>,
+  exactFenbiaoAmountTotals: Record<string, string>,
   currentConfigs: FenbiaoConfig[]
 ): Promise<SplitConfigImportResult> {
   return new Promise((resolve) => {
@@ -206,7 +232,8 @@ export function readSplitConfigTemplate(
           }
 
           // 解析各包数值
-          const values: number[] = [];
+          const ratioValues: number[] = [];
+          const amountValues: string[] = [];
           let hasParseError = false;
           for (let j = 0; j < count; j++) {
             const colKey = `包${j + 1}`;
@@ -225,22 +252,22 @@ export function readSplitConfigTemplate(
                 errors.push(`第${rowNum}行"${name}"：包${j + 1}比例"${cellStr}"无效`);
                 hasParseError = true; break;
               }
-              values.push(Math.round(num * 100)); // 万分比
+              ratioValues.push(Math.round(num * 100)); // 万分比
             } else {
               // 金额(元) 或平均分金额
-              const num = parseFloat(cellStr);
-              if (isNaN(num) || num < 0) {
+              const normalized = normalizeDecimalString(cellStr);
+              if (normalized == null || normalized.startsWith('-')) {
                 errors.push(`第${rowNum}行"${name}"：包${j + 1}金额"${cellStr}"无效`);
                 hasParseError = true; break;
               }
-              values.push(Math.round(num * 10000));
+              amountValues.push(normalized);
             }
           }
           if (hasParseError) continue;
 
           // 校验比例总和
           if (method === 'ratio') {
-            const ratioSum = values.reduce((a, b) => a + b, 0);
+            const ratioSum = ratioValues.reduce((a, b) => a + b, 0);
             if (Math.abs(ratioSum - 10000) > 1) {
               errors.push(`第${rowNum}行"${name}"：比例总和为${(ratioSum / 100).toFixed(1)}%，应为100%`);
               continue;
@@ -249,25 +276,34 @@ export function readSplitConfigTemplate(
 
           // 校验金额总和（指定金额模式）
           if (method === 'fixedAmount') {
-            const amountSum = values.reduce((a, b) => a + b, 0);
-            const targetFen = fenbiaoTotals.get(name) || 0;
-            if (amountSum !== targetFen) {
-              errors.push(`第${rowNum}行“${name}”：金额总和${intToYuan(amountSum).toFixed(2)}元 ≠ 分标总金额${intToYuan(targetFen).toFixed(2)}元，差额${intToYuan(amountSum - targetFen).toFixed(2)}元`);
+            const amountSum = sumDecimalStrings(amountValues);
+            const targetAmount = exactFenbiaoAmountTotals[name] ?? '0';
+            if (compareDecimalStrings(amountSum, targetAmount) !== 0) {
+              const diff = subtractDecimalStrings(amountSum, targetAmount);
+              errors.push(`第${rowNum}行“${name}”：金额总和${amountSum}元 ≠ 分标总金额${targetAmount}元，差额${diff}元`);
               continue;
             }
           }
 
           // 平均分模式也校验金额总和
           if (method === 'average') {
-            const amountSum = values.reduce((a, b) => a + b, 0);
-            const targetFen = fenbiaoTotals.get(name) || 0;
-            if (Math.abs(amountSum - targetFen) > 1) {
-              errors.push(`第${rowNum}行“${name}”：平均分金额总和${intToYuan(amountSum).toFixed(2)}元 ≠ 分标总金额${intToYuan(targetFen).toFixed(2)}元`);
+            const amountSum = sumDecimalStrings(amountValues);
+            const targetAmount = exactFenbiaoAmountTotals[name] ?? '0';
+            if (compareDecimalStrings(amountSum, targetAmount) !== 0) {
+              const diff = subtractDecimalStrings(amountSum, targetAmount);
+              errors.push(`第${rowNum}行“${name}”：平均分金额总和${amountSum}元 ≠ 分标总金额${targetAmount}元，差额${diff}元`);
               continue;
             }
           }
 
-          rows.push({ name, packageCount: count, method, values, rawMethod: methodRaw });
+          rows.push({
+            name,
+            packageCount: count,
+            method,
+            ratioValues: method === 'ratio' ? ratioValues : undefined,
+            amountValues: method === 'ratio' ? undefined : amountValues,
+            rawMethod: methodRaw
+          });
         }
 
         // 检查分标是否齐全

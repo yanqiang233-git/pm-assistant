@@ -8,7 +8,7 @@ import {
 } from './template/manager';
 import { parseSingleColumnPaste, parseTwoColumnPaste } from './config/paste';
 import { createInitialState, createFenbiaoConfigs, updateGlobalMethod, saveStateSnapshot } from './store/state';
-import { yuanToInt } from './split/precision';
+import { compareDecimalStrings, normalizeDecimalString, subtractDecimalStrings, sumDecimalStrings } from './split/precision';
 import {
   ensureModuleDirs,
   mirrorImportFile, mirrorTemplate, mirrorUploadedTemplate, mirrorExportResult,
@@ -369,7 +369,7 @@ function renderSplitMethod() {
       }
     } else if (c.splitMethod === 'fixedAmount') {
       if (c.fixedAmounts?.length) {
-        tplInfo = c.fixedAmounts.map(a => (a / 10000).toFixed(2)).join(' + ');
+        tplInfo = c.fixedAmounts.join(' + ');
       } else {
         tplInfo = '<span style="color:var(--color-warning)">待配置</span>';
       }
@@ -451,15 +451,6 @@ function renderSplitMethod() {
 }
 
 // ============ Split Config Template download/import ============
-function getFenbiaoTotals(): Map<string, number> {
-  const totals = new Map<string, number>();
-  for (const row of state.importResult?.rows ?? []) {
-    const name = String(row['分标名称'] ?? '').trim();
-    const price = yuanToInt(Number(row['估算总价（元）'] ?? 0));
-    totals.set(name, (totals.get(name) || 0) + price);
-  }
-  return totals;
-}
 
 btnDownloadSplitTpl.addEventListener('click', async () => {
   if (!state.importResult) return;
@@ -469,8 +460,12 @@ btnDownloadSplitTpl.addEventListener('click', async () => {
     return;
   }
   const templates = loadTemplates();
-  const totals = getFenbiaoTotals();
-  const buf = await downloadSplitConfigTemplate(validConfigs, state.globalSplitMethod, totals, templates);
+  const buf = await downloadSplitConfigTemplate(
+    validConfigs,
+    state.globalSplitMethod,
+    templates,
+    state.importResult.exactFenbiaoAmountTotals
+  );
   mirrorTemplate(buf, 'split');
 });
 
@@ -484,8 +479,12 @@ splitTplFileInput.addEventListener('change', async () => {
     splitTplFileInput.value = '';
     return;
   }
-  const totals = getFenbiaoTotals();
-  const result = await readSplitConfigTemplate(file, fenbiaoNames, totals, state.fenbiaoConfigs);
+  const result = await readSplitConfigTemplate(
+    file,
+    fenbiaoNames,
+    state.importResult.exactFenbiaoAmountTotals,
+    state.fenbiaoConfigs
+  );
 
   if (!result.success) {
     splitTplFileInput.value = '';
@@ -509,8 +508,8 @@ splitTplFileInput.addEventListener('change', async () => {
       // 创建或查找匹配的模板
       const existing = loadTemplates().find(t =>
         t.packageCount === r.packageCount &&
-        t.ratios.length === r.values.length &&
-        t.ratios.every((v, i) => Math.abs(v - r.values[i]) <= 1)
+        t.ratios.length === (r.ratioValues?.length ?? 0) &&
+        t.ratios.every((v, i) => Math.abs(v - (r.ratioValues?.[i] ?? 0)) <= 1)
       );
       if (existing) {
         state.fenbiaoConfigs[idx].templateId = existing.id;
@@ -519,14 +518,14 @@ splitTplFileInput.addEventListener('change', async () => {
           id: generateId(),
           name: `导入-${r.name}`,
           packageCount: r.packageCount,
-          ratios: r.values,
+          ratios: r.ratioValues ?? [],
           isDefault: false
         };
         addTemplate(newTpl);
         state.fenbiaoConfigs[idx].templateId = newTpl.id;
       }
     } else if (r.method === 'fixedAmount') {
-      state.fenbiaoConfigs[idx].fixedAmounts = r.values;
+      state.fenbiaoConfigs[idx].fixedAmounts = r.amountValues;
     }
     // average 不需要额外数据
   }
@@ -571,21 +570,16 @@ let fixedAmountConfigIdx = -1;
 function openFixedAmountModal(configIdx: number) {
   fixedAmountConfigIdx = configIdx;
   const config = state.fenbiaoConfigs[configIdx];
-  // Calculate total amount for this fenbiao
-  const rows = state.importResult?.rows ?? [];
-  const total = rows
-    .filter(r => String(r['分标名称'] ?? '').trim() === config.name)
-    .reduce((s, r) => s + Number(r['估算总价（元）'] ?? 0), 0);
-  const totalRounded = Math.round(total * 10000) / 10000;
+  const totalExact = state.importResult?.exactFenbiaoAmountTotals[config.name] ?? '0';
 
   fixedAmountTitle.textContent = `${config.name} - 指定每包金额`;
-  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别指定金额，总和需等于 ${totalRounded} 元`;
-  fixedAmountTarget.textContent = String(totalRounded);
+  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别指定金额，总和需等于 ${totalExact} 元`;
+  fixedAmountTarget.textContent = totalExact;
 
   let html = '';
   for (let i = 0; i < config.packageCount; i++) {
-    const existing = config.fixedAmounts?.[i] ? String(config.fixedAmounts[i] / 10000) : '';
-    html += `<div class="fa-row"><label>包${i + 1}：</label><input type="number" step="0.0001" class="fa-input" value="${existing}" /> 元</div>`;
+    const existing = config.fixedAmounts?.[i] ?? '';
+    html += `<div class="fa-row"><label>包${i + 1}：</label><input type="text" inputmode="decimal" class="fa-input" value="${existing}" /> 元</div>`;
   }
   fixedAmountInputs.innerHTML = html;
   updateFixedAmountSum();
@@ -597,14 +591,13 @@ function openFixedAmountModal(configIdx: number) {
 
 function updateFixedAmountSum() {
   const inputs = fixedAmountInputs.querySelectorAll('.fa-input') as NodeListOf<HTMLInputElement>;
-  let sum = 0;
-  inputs.forEach(inp => { sum += Number(inp.value) || 0; });
-  const sumRounded = Math.round(sum * 10000) / 10000;
-  const target = parseFloat(fixedAmountTarget.textContent || '0');
-  const diff = Math.round((sumRounded - target) * 10000) / 10000;
-  fixedAmountSum.textContent = String(sumRounded);
-  fixedAmountDiff.textContent = String(diff);
-  fixedAmountDiff.style.color = Math.abs(diff) < 0.00005 ? 'var(--color-success)' : 'var(--color-danger)';
+  const values = Array.from(inputs, inp => normalizeDecimalString(inp.value) ?? '0');
+  const sum = sumDecimalStrings(values);
+  const target = fixedAmountTarget.textContent || '0';
+  const diff = subtractDecimalStrings(sum, target);
+  fixedAmountSum.textContent = sum;
+  fixedAmountDiff.textContent = diff;
+  fixedAmountDiff.style.color = compareDecimalStrings(diff, '0') === 0 ? 'var(--color-success)' : 'var(--color-danger)';
 }
 
 function closeFixedAmountModal() { fixedAmountModal.classList.add('hidden'); }
@@ -612,17 +605,20 @@ fixedAmountCancel.addEventListener('click', closeFixedAmountModal);
 fixedAmountClose.addEventListener('click', closeFixedAmountModal);
 fixedAmountOk.addEventListener('click', () => {
   const inputs = fixedAmountInputs.querySelectorAll('.fa-input') as NodeListOf<HTMLInputElement>;
-  const target = parseFloat(fixedAmountTarget.textContent || '0');
-  const amounts: number[] = [];
-  let sum = 0;
-  inputs.forEach(inp => {
-    const v = Math.round(Number(inp.value || 0) * 10000);
-    amounts.push(v);
-    sum += v;
-  });
-  const targetInt = Math.round(target * 10000);
-  if (sum !== targetInt) {
-    alert(`金额总和 ${sum / 10000} 与目标 ${target} 不一致，差额 ${(sum - targetInt) / 10000} 元`);
+  const target = fixedAmountTarget.textContent || '0';
+  const amounts: string[] = [];
+  for (const input of Array.from(inputs)) {
+    const normalized = normalizeDecimalString(input.value);
+    if (normalized == null || normalized.startsWith('-')) {
+      alert(`金额输入无效：${input.value || '(空)'}`);
+      return;
+    }
+    amounts.push(normalized);
+  }
+  const sum = sumDecimalStrings(amounts);
+  const diff = subtractDecimalStrings(sum, target);
+  if (compareDecimalStrings(diff, '0') !== 0) {
+    alert(`金额总和 ${sum} 与目标 ${target} 不一致，差额 ${diff} 元`);
     return;
   }
   state.fenbiaoConfigs[fixedAmountConfigIdx].fixedAmounts = amounts;

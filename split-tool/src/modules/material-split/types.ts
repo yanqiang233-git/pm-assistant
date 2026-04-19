@@ -42,8 +42,8 @@ export interface FenbiaoConfig {
   overridden: boolean;
   /** 关联的模板 id（比例模式时） */
   templateId?: string;
-  /** 指定的每包金额（分，整数）（指定金额模式时） */
-  fixedAmounts?: number[];
+  /** 指定的每包金额（精确十进制字符串）（指定金额模式时） */
+  fixedAmounts?: string[];
 }
 
 /** 校验错误 */
@@ -63,6 +63,7 @@ export interface ImportResult {
   fenbiaoNames: string[];
   totalRows: number;
   preAllocatedCount: number;
+  exactFenbiaoAmountTotals: Record<string, string>;
   errors: ValidationError[];
 }
 

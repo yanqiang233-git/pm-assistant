@@ -1,5 +1,17 @@
 import * as XLSX from 'xlsx';
 import { REQUIRED_FIELDS, PKG_NAME_PATTERN, ExcelRow, ValidationError, ImportResult } from '../types';
+import { addDecimalStrings, normalizeDecimalString } from '../split/precision';
+
+function collectExactFenbiaoAmountTotals(rows: ExcelRow[]): Record<string, string> {
+  const totals: Record<string, string> = {};
+  for (const row of rows) {
+    const name = String(row['分标名称'] ?? '').trim();
+    const amount = normalizeDecimalString(row['估算总价（元）']);
+    if (!name || amount == null) continue;
+    totals[name] = totals[name] ? addDecimalStrings(totals[name], amount) : amount;
+  }
+  return totals;
+}
 
 /** 核心校验逻辑：接收二进制数据和文件名，返回 ImportResult */
 function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
@@ -11,7 +23,7 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
     if (jsonData.length === 0) {
       return {
         success: false, fileName, rows: [], headers: [],
-        headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0,
+        headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0, exactFenbiaoAmountTotals: {},
         errors: [{ type: 'missing_fields', message: '表格为空或无法读取数据' }]
       };
     }
@@ -37,7 +49,7 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
       });
       return {
         success: false, fileName, rows: jsonData, headers,
-        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, errors
+        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, exactFenbiaoAmountTotals: {}, errors
       };
     }
 
@@ -62,7 +74,7 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
       });
       return {
         success: false, fileName, rows: jsonData, headers,
-        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, errors
+        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, exactFenbiaoAmountTotals: {}, errors
       };
     }
 
@@ -82,7 +94,7 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
       });
       return {
         success: false, fileName, rows: jsonData, headers,
-        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, errors
+        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, exactFenbiaoAmountTotals: {}, errors
       };
     }
 
@@ -107,7 +119,7 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
       });
       return {
         success: false, fileName, rows: jsonData, headers,
-        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, errors
+        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, exactFenbiaoAmountTotals: {}, errors
       };
     }
 
@@ -118,15 +130,16 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
       if (name) fenbiaoSet.add(name);
     });
     const fenbiaoNames = [...fenbiaoSet].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    const exactFenbiaoAmountTotals = collectExactFenbiaoAmountTotals(jsonData);
 
     return {
       success: true, fileName, rows: jsonData, headers,
-      headerOrder, fenbiaoNames, totalRows: jsonData.length, preAllocatedCount: preAllocIndices.size, errors: []
+      headerOrder, fenbiaoNames, totalRows: jsonData.length, preAllocatedCount: preAllocIndices.size, exactFenbiaoAmountTotals, errors: []
     };
   } catch (err) {
     return {
       success: false, fileName, rows: [], headers: [],
-      headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0,
+      headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0, exactFenbiaoAmountTotals: {},
       errors: [{ type: 'missing_fields', message: `读取文件失败: ${err}` }]
     };
   }
@@ -143,7 +156,7 @@ export function readAndValidate(file: File): Promise<ImportResult> {
     reader.onerror = () => {
       resolve({
         success: false, fileName: file.name, rows: [], headers: [],
-        headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0,
+        headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0, exactFenbiaoAmountTotals: {},
         errors: [{ type: 'missing_fields', message: '文件读取失败' }]
       });
     };
