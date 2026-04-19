@@ -1,12 +1,14 @@
 {
   "name": "pm-assistant",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "项目经理助手",
   "type": "module",
   "scripts": {
     "dev": "vite --port 5175",
     "build": "tsc && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check:version": "node scripts/check-version-consistency.mjs",
+    "release:prepare": "node scripts/prepare-windows-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/plugin-dialog": "^2.7.0",
