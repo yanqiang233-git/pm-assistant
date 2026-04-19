@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>项目经理助手</title>
+  <link rel="stylesheet" href="/src/shell/workbench.css" />
+</head>
+<body>
+  <div class="workbench">
+    <!-- 顶部导航栏 -->
+    <header class="wb-header">
+      <div class="wb-header-brand">
+        <h1 class="wb-title">项目经理助手</h1>
+        <span class="wb-subtitle">Project Manager Assistant</span>
+      </div>
+      <div class="wb-header-context" id="headerContext">
+        <!-- JS 渲染当前项目摘要 -->
+      </div>
+    </header>
+
+    <!-- 主内容区：左右分栏 -->
+    <main class="wb-main">
+      <!-- 左栏：项目上下文 -->
+      <aside class="wb-sidebar">
+        <section class="wb-panel wb-current-project">
+          <div class="wb-panel-header">
+            <h2>当前项目</h2>
+            <div class="wb-panel-actions">
+              <button class="btn btn-outline btn-sm" id="btnOpenProject">打开</button>
+              <button class="btn btn-primary btn-sm" id="btnCreateProject">+ 新建</button>
+            </div>
+          </div>
+          <div class="wb-panel-body" id="projectInfo">
+            <div class="wb-empty-state">
+              <div class="empty-icon">📁</div>
+              <p>暂未选择项目</p>
+              <p class="empty-hint">点击上方"新建"创建第一个项目</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="wb-panel wb-recent-projects">
+          <div class="wb-panel-header">
+            <h2>最近项目</h2>
+            <span class="wb-badge" id="projectCount">0</span>
+          </div>
+          <div class="wb-panel-body wb-history-list" id="historyList">
+            <div class="wb-empty-state">
+              <p class="empty-hint">暂无历史项目</p>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <!-- 右栏：模块工作区 -->
+      <section class="wb-content">
+        <div class="wb-content-header">
+          <h2>功能模块</h2>
+          <p class="wb-content-hint" id="moduleHint">请先选择或创建项目后使用功能模块</p>
+        </div>
+        <div class="wb-module-cards" id="moduleCards">
+          <!-- JS 渲染模块卡片 -->
+        </div>
+      </section>
+    </main>
+
+    <!-- 底部状态栏 -->
+    <footer class="wb-footer">
+      <div class="wb-footer-left">
+        <span class="wb-status-dot" id="statusDot"></span>
+        <span class="wb-footer-version">v1.0.0</span>
+      </div>
+      <span class="wb-footer-path" id="footerPath" title="">未选择项目</span>
+    </footer>
+
+    <!-- 新建项目弹窗 -->
+    <div class="modal-overlay hidden" id="createProjectModal">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>新建项目</h3>
+          <button class="modal-close" id="createProjectClose">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="projectNumber">项目编号</label>
+            <input type="text" id="projectNumber" placeholder="请输入项目编号" />
+          </div>
+          <div class="form-group">
+            <label for="projectCategory">项目类别</label>
+            <select id="projectCategory">
+              <option value="material">物资类</option>
+              <option value="engineering-service">工程服务类</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>项目目录</label>
+            <div class="dir-picker">
+              <span class="dir-path" id="projectDirPath">请选择保存位置...</span>
+              <button class="btn btn-outline" id="btnPickDir">选择目录</button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline" id="createProjectCancel">取消</button>
+          <button class="btn btn-primary" id="createProjectOk">创建</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script type="module" src="/src/shell/main.ts"></script>
+</body>
+</html>

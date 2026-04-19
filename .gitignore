@@ -1,0 +1,25 @@
+# Dependencies
+split-tool/node_modules/
+
+# Build outputs
+.vite/
+split-tool/dist/
+split-tool/src-tauri/target/
+split-tool/.vite/
+
+# OS files
+.DS_Store
+**/.DS_Store
+
+# Excel temp files
+.~*.xlsx
+~$*.xlsx
+
+# Local sample and test data
+test-data/*.xlsx
+
+# Archives
+*.zip
+
+# Temporary archives and packages
+split-tool.zip

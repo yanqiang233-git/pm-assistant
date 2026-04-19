@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>上报物资汇总表拆分工具</title>
+  <link rel="stylesheet" href="/src/modules/material-split/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>上报物资汇总表拆分工具</h1>
+    <nav class="module-nav" id="moduleNav">
+      <a href="#section-import">导入</a>
+      <a href="#section-pkg-config">分包配置</a>
+      <a href="#section-split-method">拆分方式</a>
+      <a href="#section-template">比例模板</a>
+      <a href="#section-preview">预览</a>
+      <a href="#section-export">导出</a>
+    </nav>
+  </header>
+
+  <main class="app-main">
+    <!-- ===== 导入与校验模块 ===== -->
+    <section id="section-import" class="module">
+      <div class="module-header">
+        <h2>导入与校验</h2>
+        <span class="status-badge" id="importStatus">未导入</span>
+      </div>
+      <div class="module-body">
+        <div class="import-area">
+          <input type="file" id="fileInput" accept=".xlsx" />
+          <button class="btn btn-primary" id="btnImport">选择文件并导入</button>
+        </div>
+        <div id="importInfo" class="import-info hidden"></div>
+        <div id="importErrors" class="error-list hidden"></div>
+      </div>
+    </section>
+
+    <!-- ===== 分包数量配置模块 ===== -->
+    <section id="section-pkg-config" class="module disabled-module">
+      <div class="module-header">
+        <h2>分包数量配置</h2>
+        <span class="status-badge" id="pkgConfigStatus">待导入</span>
+      </div>
+      <div class="module-body">
+        <!-- 摘要栏 -->
+        <div class="summary-bar" id="pkgSummary">
+          <span>总标段数: <strong id="totalFenbiao">0</strong></span>
+          <span>已配置: <strong id="configuredCount">0</strong></span>
+          <span>总分包数: <strong id="totalPackages">0</strong></span>
+          <span class="error-count">异常: <strong id="errorCount">0</strong></span>
+        </div>
+        <!-- 操作按钮 -->
+        <div class="toolbar">
+          <button class="btn btn-sm" id="btnPasteSingle" title="从 Excel 复制单列分包数量粘贴">粘贴单列数量</button>
+          <button class="btn btn-sm" id="btnPasteTwoCol" title="从 Excel 复制两列(分标名称+分包数量)粘贴">粘贴两列匹配</button>
+          <button class="btn btn-sm" id="btnDownloadTpl">下载配置模板</button>
+          <button class="btn btn-sm" id="btnImportTpl">导入配置模板</button>
+          <input type="file" id="tplFileInput" accept=".xlsx" class="hidden" />
+          <button class="btn btn-sm btn-danger" id="btnResetPkg">重置</button>
+        </div>
+        <!-- 粘贴反馈 -->
+        <div id="pasteResult" class="paste-result hidden"></div>
+        <!-- 分标配置表 -->
+        <div class="config-table-wrap">
+          <table class="config-table" id="pkgTable">
+            <thead>
+              <tr>
+                <th class="col-idx">#</th>
+                <th class="col-name">分标名称</th>
+                <th class="col-count">分包数量</th>
+                <th class="col-status">状态</th>
+              </tr>
+            </thead>
+            <tbody id="pkgTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 拆分方式确认模块 ===== -->
+    <section id="section-split-method" class="module disabled-module">
+      <div class="module-header">
+        <h2>拆分方式确认</h2>
+        <span class="status-badge" id="splitMethodStatus">待配置</span>
+      </div>
+      <div class="module-body">
+        <div class="global-method">
+          <label>全局拆分方式：</label>
+          <select id="globalMethodSelect">
+            <option value="average">按金额平均分</option>
+            <option value="ratio">按比例模板拆分</option>
+            <option value="fixedAmount">指定每包金额</option>
+          </select>
+        </div>
+        <div class="toolbar">
+          <button class="btn btn-sm" id="btnDownloadSplitTpl">下载拆分配置模板</button>
+          <button class="btn btn-sm" id="btnImportSplitTpl">导入拆分配置</button>
+          <input type="file" id="splitTplFileInput" accept=".xlsx" class="hidden" />
+        </div>
+        <div id="splitImportResult" class="paste-result hidden"></div>
+        <div class="config-table-wrap">
+          <table class="config-table" id="splitTable">
+            <thead>
+              <tr>
+                <th class="col-idx">#</th>
+                <th class="col-name">分标名称</th>
+                <th class="col-pkg">分包数</th>
+                <th class="col-method">拆分方式</th>
+                <th class="col-tpl">模板/金额</th>
+                <th class="col-override">覆盖</th>
+                <th class="col-action">操作</th>
+              </tr>
+            </thead>
+            <tbody id="splitTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 比例模板管理模块 ===== -->
+    <section id="section-template" class="module">
+      <div class="module-header">
+        <h2>比例模板管理</h2>
+        <span class="status-badge" id="templateStatus">就绪</span>
+      </div>
+      <div class="module-body">
+        <div class="toolbar">
+          <button class="btn btn-sm btn-primary" id="btnAddTemplate">新增模板</button>
+        </div>
+        <div id="templateGroups" class="template-groups"></div>
+      </div>
+    </section>
+
+    <!-- ===== 结果预览模块 ===== -->
+    <section id="section-preview" class="module disabled-module">
+      <div class="module-header">
+        <h2>结果预览</h2>
+        <span class="status-badge" id="previewStatus">待拆分</span>
+      </div>
+      <div class="module-body">
+        <div class="toolbar">
+          <button class="btn btn-primary" id="btnExecuteSplit">执行拆分并预览</button>
+        </div>
+        <div id="previewSummary" class="preview-summary hidden"></div>
+        <div class="preview-table-wrap">
+          <table class="preview-table" id="previewTable">
+            <thead id="previewTableHead"></thead>
+            <tbody id="previewTableBody"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="previewPagination"></div>
+      </div>
+    </section>
+
+    <!-- ===== 导出模块 ===== -->
+    <section id="section-export" class="module disabled-module">
+      <div class="module-header">
+        <h2>导出</h2>
+        <span class="status-badge" id="exportStatus">待预览</span>
+      </div>
+      <div class="module-body">
+        <div id="exportSummary" class="export-summary hidden"></div>
+        <button class="btn btn-primary btn-lg" id="btnExport">导出拆分结果</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== 粘贴弹窗 ===== -->
+  <div class="modal-overlay hidden" id="pasteModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="pasteModalTitle">粘贴数据</h3>
+        <button class="modal-close" id="pasteModalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="pasteModalHint"></p>
+        <textarea id="pasteTextarea" rows="12" placeholder="在此粘贴数据..."></textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="pasteModalCancel">取消</button>
+        <button class="btn btn-primary" id="pasteModalOk">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 模板编辑弹窗 ===== -->
+  <div class="modal-overlay hidden" id="templateModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="tplModalTitle">新增比例模板</h3>
+        <button class="modal-close" id="tplModalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label>分包数量：</label>
+          <input type="number" id="tplPkgCount" min="1" value="2" />
+        </div>
+        <div class="form-row">
+          <label>模板名称：</label>
+          <input type="text" id="tplName" placeholder="例如：7:3分配" />
+        </div>
+        <div class="form-row">
+          <label>
+            <input type="checkbox" id="tplIsDefault" /> 设为默认模板
+          </label>
+        </div>
+        <div class="form-row">
+          <label>比例设置（%，总和需等于100）：</label>
+          <div id="tplRatioInputs" class="ratio-inputs"></div>
+          <div class="ratio-sum">当前合计: <strong id="tplRatioSum">0</strong>%</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="tplModalCancel">取消</button>
+        <button class="btn btn-primary" id="tplModalOk">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 指定金额弹窗 ===== -->
+  <div class="modal-overlay hidden" id="fixedAmountModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="fixedAmountTitle">指定每包金额</h3>
+        <button class="modal-close" id="fixedAmountClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="fixedAmountHint"></p>
+        <div id="fixedAmountInputs" class="fixed-amount-inputs"></div>
+        <div class="amount-sum-row">
+          当前合计: <strong id="fixedAmountSum">0.00</strong> 元
+          &nbsp;|&nbsp; 应等于: <strong id="fixedAmountTarget">0.00</strong> 元
+          &nbsp;|&nbsp; 差额: <strong id="fixedAmountDiff">0.00</strong> 元
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="fixedAmountCancel">取消</button>
+        <button class="btn btn-primary" id="fixedAmountOk">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/modules/material-split/main.ts"></script>
+</body>
+</html>
