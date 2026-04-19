@@ -473,6 +473,11 @@ btnImportSplitTpl.addEventListener('click', () => splitTplFileInput.click());
 splitTplFileInput.addEventListener('change', async () => {
   const file = splitTplFileInput.files?.[0];
   if (!file) return;
+  const importResult = state.importResult;
+  if (!importResult) {
+    splitTplFileInput.value = '';
+    return;
+  }
   const fenbiaoNames = state.fenbiaoConfigs.filter(c => c.packageCount >= 1).map(c => c.name);
   if (fenbiaoNames.length === 0) {
     alert('请先配置分包数量');
@@ -482,7 +487,7 @@ splitTplFileInput.addEventListener('change', async () => {
   const result = await readSplitConfigTemplate(
     file,
     fenbiaoNames,
-    state.importResult.exactFenbiaoAmountTotals,
+    importResult.exactFenbiaoAmountTotals,
     state.fenbiaoConfigs
   );
 
