@@ -88,7 +88,7 @@ git push
 2. 在页面底部找到 `Artifacts`
 3. 下载以下产物：
    - `windows-nsis`
-   - `windows-msi`
+   - `windows-exe`
 
 ---
 
@@ -103,8 +103,8 @@ git push
 5. 校验 `package.json`、`tauri.conf.json`、`Cargo.toml` 的版本号一致
 6. 执行 `npm ci`
 7. 执行 `npx tsc --noEmit`
-8. 执行 `npm run tauri build`
-9. 上传 NSIS 安装包和 MSI 安装包
+8. 执行 `npm run tauri build -- --bundles nsis`
+9. 上传 NSIS 安装包和原始 exe 文件
 
 ---
 
@@ -195,7 +195,13 @@ git push
 工作流成功后会提供：
 
 - `windows-nsis`：推荐分发的安装向导 `.exe`
-- `windows-msi`：适合企业部署的 `.msi`
+- `windows-exe`：原始可执行文件，便于调试或手动封装
+
+说明：
+
+- 云打包当前默认只产出 `NSIS` 和原始 `exe`
+- 本机 Windows 打包仍可使用 `MSI`
+- 这样做是为了绕开 GitHub Actions 上 `WiX/light.exe` 的不稳定失败点，优先保证云端打包流程稳定可复用
 
 ---
 
