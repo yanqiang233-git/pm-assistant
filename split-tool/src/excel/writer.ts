@@ -1,45 +1,13 @@
 import * as XLSX from 'xlsx';
 import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate } from '../types';
-import { splitAverage, intToYuan } from '../split/precision';
-
-/** 通过 Tauri 原生对话框保存文件，浏览器环境回退到 Blob 下载 */
-async function saveToFile(data: Uint8Array, filename: string): Promise<void> {
-  try {
-    const { save } = await import('@tauri-apps/plugin-dialog');
-    const { writeFile } = await import('@tauri-apps/plugin-fs');
-    const filePath = await save({
-      title: '保存文件',
-      defaultPath: filename,
-      filters: [{ name: 'Excel 文件', extensions: ['xlsx'] }]
-    });
-    if (filePath) {
-      await writeFile(filePath, data);
-    }
-    return;
-  } catch {
-    // Not in Tauri, fall back to browser download
-  }
-  const blob = new Blob([data.buffer as ArrayBuffer], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, 100);
-}
+import { splitAverage, yuanToFen, fenToYuan } from '../split/precision';
 
 /** 将拆分结果写入 xlsx 并下载，同时返回二进制数据用于项目目录镜像 */
-export async function exportToXlsx(
+export function exportToXlsx(
   rows: SplitRow[],
   headerOrder: string[],
   outputFileName: string
-): Promise<Uint8Array> {
+): Uint8Array {
   const wsData: unknown[][] = [headerOrder];
   for (const row of rows) {
     const line: unknown[] = headerOrder.map(h => row[h] ?? '');
@@ -48,13 +16,12 @@ export async function exportToXlsx(
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
-  const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
-  await saveToFile(data, outputFileName);
-  return data;
+  XLSX.writeFile(wb, outputFileName);
+  return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
 }
 
 /** 下载分包数量配置模板，同时返回二进制数据用于项目目录镜像 */
-export async function downloadConfigTemplate(fenbiaoNames: string[]): Promise<Uint8Array> {
+export function downloadConfigTemplate(fenbiaoNames: string[]): Uint8Array {
   const wsData: unknown[][] = [['分标名称', '分包数量']];
   for (const name of fenbiaoNames) {
     wsData.push([name, '']);
@@ -63,9 +30,8 @@ export async function downloadConfigTemplate(fenbiaoNames: string[]): Promise<Ui
   ws['!cols'] = [{ wch: 30 }, { wch: 15 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '分包数量配置');
-  const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
-  await saveToFile(data, '分包数量配置模板.xlsx');
-  return data;
+  XLSX.writeFile(wb, '分包数量配置模板.xlsx');
+  return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
 }
 
 /** 拆分方式中文名映射 */
@@ -87,12 +53,12 @@ const LABEL_TO_METHOD: Record<string, SplitMethod> = {
  * - 比例模板: 填百分数
  * - 指定金额: 填金额(元)
  */
-export async function downloadSplitConfigTemplate(
+export function downloadSplitConfigTemplate(
   configs: FenbiaoConfig[],
   defaultMethod: SplitMethod,
   fenbiaoTotals: Map<string, number>,
   templates: RatioTemplate[]
-): Promise<Uint8Array> {
+): Uint8Array {
   // 计算最大分包数以确定列数
   const maxPkg = Math.max(...configs.map(c => c.packageCount), 1);
   // 表头
@@ -104,13 +70,13 @@ export async function downloadSplitConfigTemplate(
     if (c.packageCount < 1) continue;
     const method = c.overridden ? c.splitMethod : defaultMethod;
     const totalFen = fenbiaoTotals.get(c.name) || 0;
-    const row: unknown[] = [c.name, intToYuan(totalFen), c.packageCount, METHOD_LABELS[method]];
+    const row: unknown[] = [c.name, fenToYuan(totalFen), c.packageCount, METHOD_LABELS[method]];
 
     if (method === 'average') {
       // 自动带出每包金额
       const shares = splitAverage(totalFen, c.packageCount);
       for (let i = 0; i < maxPkg; i++) {
-        row.push(i < c.packageCount ? intToYuan(shares[i]) : '');
+        row.push(i < c.packageCount ? fenToYuan(shares[i]) : '');
       }
     } else if (method === 'ratio') {
       // 如果已关联模板，带出比例；否则留空
@@ -128,7 +94,7 @@ export async function downloadSplitConfigTemplate(
       // 如果已设金额，带出；否则留空
       for (let i = 0; i < maxPkg; i++) {
         if (i < c.packageCount && c.fixedAmounts?.[i] != null) {
-          row.push(intToYuan(c.fixedAmounts[i]));
+          row.push(fenToYuan(c.fixedAmounts[i]));
         } else if (i < c.packageCount) {
           row.push('');
         } else {
@@ -145,16 +111,15 @@ export async function downloadSplitConfigTemplate(
   for (let i = 0; i < maxPkg; i++) ws['!cols']!.push({ wch: 14 });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '拆分方式配置');
-  const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
-  await saveToFile(data, '拆分方式配置模板.xlsx');
-  return data;
+  XLSX.writeFile(wb, '拆分方式配置模板.xlsx');
+  return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
 }
 
 export interface SplitConfigRow {
   name: string;
   packageCount: number;
   method: SplitMethod;
-  values: number[];   // 比例为百分数×100(万分比), 金额为×10000(整数), 平均分为×10000(整数)
+  values: number[];   // 比例为百分数×100(万分比), 金额为分(整数), 平均分为分(整数)
   rawMethod: string;
 }
 
@@ -233,7 +198,7 @@ export function readSplitConfigTemplate(
                 errors.push(`第${rowNum}行"${name}"：包${j + 1}金额"${cellStr}"无效`);
                 hasParseError = true; break;
               }
-              values.push(Math.round(num * 10000));
+              values.push(Math.round(num * 100)); // 分
             }
           }
           if (hasParseError) continue;
@@ -252,7 +217,7 @@ export function readSplitConfigTemplate(
             const amountSum = values.reduce((a, b) => a + b, 0);
             const targetFen = fenbiaoTotals.get(name) || 0;
             if (amountSum !== targetFen) {
-              errors.push(`第${rowNum}行“${name}”：金额总和${intToYuan(amountSum).toFixed(2)}元 ≠ 分标总金额${intToYuan(targetFen).toFixed(2)}元，差额${intToYuan(amountSum - targetFen).toFixed(2)}元`);
+              errors.push(`第${rowNum}行"${name}"：金额总和${fenToYuan(amountSum).toFixed(2)}元 ≠ 分标总金额${fenToYuan(targetFen).toFixed(2)}元，差额${fenToYuan(amountSum - targetFen).toFixed(2)}元`);
               continue;
             }
           }
@@ -262,7 +227,7 @@ export function readSplitConfigTemplate(
             const amountSum = values.reduce((a, b) => a + b, 0);
             const targetFen = fenbiaoTotals.get(name) || 0;
             if (Math.abs(amountSum - targetFen) > 1) {
-              errors.push(`第${rowNum}行“${name}”：平均分金额总和${intToYuan(amountSum).toFixed(2)}元 ≠ 分标总金额${intToYuan(targetFen).toFixed(2)}元`);
+              errors.push(`第${rowNum}行"${name}"：平均分金额总和${fenToYuan(amountSum).toFixed(2)}元 ≠ 分标总金额${fenToYuan(targetFen).toFixed(2)}元`);
               continue;
             }
           }

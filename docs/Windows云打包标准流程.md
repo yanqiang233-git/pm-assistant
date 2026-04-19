@@ -1,7 +1,7 @@
 # Windows 云打包标准流程
 
 > 本文档用于 GitHub Actions 云端 Windows 打包。
-> 目标是让后续打包变成标准流程：改版本号、提交推送、触发工作流、下载安装包。
+> 目标是让后续打包变成标准流程：准备版本文件、手动触发打包工作流、下载安装包。
 
 ---
 
@@ -50,25 +50,37 @@
 
 当前工作流内置了版本一致性校验，如果三处不一致，构建会直接失败。
 
-### 3.2 提交并推送
-
-在 VS Code 终端执行：
+推荐使用以下命令统一更新：
 
 ```bash
-git add .
-git commit -m "release: build windows v1.0.1"
-git push
+cd split-tool
+npm run release:prepare -- 1.0.1
 ```
+
+提交规范见：
+
+- [docs/Windows打包提交标准流程.md](docs/Windows打包提交标准流程.md)
+
+### 3.2 提交并推送
+
+推荐使用项目根目录的一键脚本：
+
+```bash
+./push-windows-build.sh 1.0.1
+```
+
+脚本会自动更新版本、校验一致性、暂存打包所需文件、提交并推送。
+
+详细步骤见 [docs/Windows打包提交标准流程.md](Windows打包提交标准流程.md)。
+
+注意：
+
+- 推送后不会自动触发打包
+- 需要你手动运行打包工作流
 
 ### 3.3 触发云端打包
 
-有两种方式：
-
-#### 方式 A：推送后自动打包
-
-只要推送到了 `main` 分支，GitHub Actions 会自动触发。
-
-#### 方式 B：手动一键打包
+当前只保留手动执行方式：
 
 在 GitHub 页面操作：
 
@@ -78,7 +90,7 @@ git push
 4. 点击 `Run workflow`
 5. 选择分支并执行
 
-这就是后续最接近“一键运行”的方式。
+这样可以避免“刚推送版本文件就立刻开始打包”，把“准备提交”和“真正打包”拆成两个独立动作。
 
 ### 3.4 下载产物
 
@@ -94,7 +106,7 @@ git push
 
 ## 四、工作流做了什么
 
-`.github/workflows/build-windows.yml` 会自动执行以下步骤：
+`.github/workflows/build-windows.yml` 在你手动运行后会执行以下步骤：
 
 1. 拉取仓库代码
 2. 安装 Node.js 20
@@ -114,12 +126,10 @@ git push
 
 ```text
 请按 docs/Windows云打包标准流程.md 执行 Windows 云打包：
-1. 将版本号更新为 1.0.1
-2. 同步修改 split-tool/package.json、split-tool/src-tauri/tauri.conf.json、split-tool/src-tauri/Cargo.toml
-3. 检查版本号一致性
-4. 提交变更，commit message 使用：release: build windows v1.0.1
-5. 如果当前环境已配置 Git 远程并允许推送，则推送到 main
-6. 提醒我去 GitHub Actions 里运行或查看 Build Windows App
+1. 先向我确认版本号
+2. 运行 ./push-windows-build.sh 提交打包所需文件
+3. 不要直接执行打包工作流
+4. 等我需要真正打包时，再告诉我如何手动运行 Build Windows App
 ```
 
 如果你只想让 AI 做“准备工作”而不立即推送，也可以这样说：
@@ -136,24 +146,25 @@ git push
 
 ## 六、VS Code 中的推荐操作方式
 
-### 方式 A：终端执行
+### 方式 A：一键脚本（推荐）
 
-这是最稳定的方式：
+在 VS Code 终端执行：
 
 ```bash
-git add .
-git commit -m "release: build windows v1.0.1"
-git push
+./push-windows-build.sh 1.0.1
 ```
 
-### 方式 B：Source Control 面板
+脚本会自动完成版本更新、校验、暂存、提交和推送。
 
-在 VS Code 左侧 `Source Control`：
+### 方式 B：手动打包
 
-1. 查看改动
-2. 填写提交信息
-3. 点击提交
-4. 点击同步或推送
+推送完成后，如果需要打包：
+
+1. 打开 GitHub 仓库 → `Actions`
+2. 选择 `Build Windows App`
+3. 点击 `Run workflow`
+4. 选择已更新版本的分支
+5. 点击运行
 
 ---
 
@@ -211,9 +222,8 @@ git push
 
 正式 Windows 打包时，统一走以下路径：
 
-1. 修改版本号
-2. 提交推送
-3. 运行或等待 `Build Windows App`
-4. 下载 Artifacts
+1. 运行 `./push-windows-build.sh <版本号>` 提交打包所需文件
+2. 需要真正打包时，手动运行 `Build Windows App`
+3. 下载 Artifacts
 
 这样可以避免把整个项目复制到 Windows 电脑，也避免本地维护一套 Windows 打包环境。

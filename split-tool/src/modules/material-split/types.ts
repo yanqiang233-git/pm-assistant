@@ -1,3 +1,6 @@
+/** 预分配行分包名称正则：严格匹配 "包N" */
+export const PKG_NAME_PATTERN = /^包(\d+)$/;
+
 /** 40 个必须字段 */
 export const REQUIRED_FIELDS = [
   'No.', '采购申请id', '批次计划编号', '总部采购申请号', '网省采购申请号',
@@ -45,7 +48,7 @@ export interface FenbiaoConfig {
 
 /** 校验错误 */
 export interface ValidationError {
-  type: 'missing_fields' | 'already_packed' | 'duplicate_申请号' | 'invalid_number';
+  type: 'missing_fields' | 'already_packed' | 'pre_alloc_invalid' | 'duplicate_申请号' | 'invalid_number';
   message: string;
   details?: string[];
 }
@@ -59,6 +62,7 @@ export interface ImportResult {
   headerOrder: string[];
   fenbiaoNames: string[];
   totalRows: number;
+  preAllocatedCount: number;
   errors: ValidationError[];
 }
 

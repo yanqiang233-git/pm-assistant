@@ -1,16 +1,17 @@
 /**
  * 精度拆分算法模块
- * 所有金额内部以"分"（×100）表示，数量以 ×1000000 表示，避免浮点误差
+ * 所有金额内部以 ×10000 表示（支持4位小数），数量以 ×1000000 表示，避免浮点误差
+ * splitByRatio 内部使用 BigInt 防止中间乘法溢出
  */
 
-/** 将元转换为分（整数） */
-export function yuanToFen(yuan: number): number {
-  return Math.round(yuan * 100);
+/** 将元转换为整数（×10000） */
+export function yuanToInt(yuan: number): number {
+  return Math.round(yuan * 10000);
 }
 
-/** 将分转换为元（2位小数） */
-export function fenToYuan(fen: number): number {
-  return fen / 100;
+/** 将整数转换为元 */
+export function intToYuan(n: number): number {
+  return n / 10000;
 }
 
 /** 将数量转换为整数（×1000000） */
@@ -24,17 +25,19 @@ export function intToQty(n: number): number {
 }
 
 /**
- * 按比例拆分整数值
+ * 按比例拆分整数值（使用 BigInt 防止中间乘法溢出）
  * @param total 总量（整数）
- * @param ratios 各包比例（万分比，总和应为 10000）
+ * @param ratios 各包比例（整数，相对大小即可）
  * @returns 各包分配量（整数），总和严格等于 total
  */
 export function splitByRatio(total: number, ratios: number[]): number[] {
   const n = ratios.length;
   const ratioSum = ratios.reduce((a, b) => a + b, 0);
-  const results = ratios.map(r => Math.floor(total * r / ratioSum));
+  if (ratioSum === 0) return ratios.map(() => 0);
+  const totalBig = BigInt(Math.round(total));
+  const ratioSumBig = BigInt(Math.round(ratioSum));
+  const results = ratios.map(r => Number(totalBig * BigInt(Math.round(r)) / ratioSumBig));
   let remainder = total - results.reduce((a, b) => a + b, 0);
-  // 余数按序号从小到大逐个补 1
   for (let i = 0; i < n && remainder > 0; i++) {
     results[i]++;
     remainder--;
@@ -57,13 +60,22 @@ export function splitAverage(total: number, n: number): number[] {
 /**
  * 按指定金额比例拆分（指定金额模式）
  * @param total 总量（整数）
- * @param amounts 各包指定金额（整数），已知总和等于分标总金额
- * @param amountSum 各包金额总和（整数）
+ * @param amounts 各包指定金额（整数），作为比例权重
  * @returns 各包分配量
  */
-export function splitByFixedAmounts(total: number, amounts: number[], amountSum: number): number[] {
+export function splitByFixedAmounts(total: number, amounts: number[]): number[] {
+  const amountSum = amounts.reduce((a, b) => a + b, 0);
   if (amountSum === 0) return amounts.map(() => 0);
-  // 将指定金额转换为万分比
-  const ratios = amounts.map(a => Math.round(a * 10000 / amountSum));
-  return splitByRatio(total, ratios);
+  return splitByRatio(total, amounts);
+}
+
+/**
+ * 调整数组最后一项，使总和严格等于目标值
+ * @param items 数值数组（将被原地修改）
+ * @param target 目标总和
+ */
+export function adjustLastItem(items: number[], target: number): void {
+  if (items.length === 0) return;
+  const sumOfRest = items.slice(0, -1).reduce((a, b) => a + b, 0);
+  items[items.length - 1] = target - sumOfRest;
 }

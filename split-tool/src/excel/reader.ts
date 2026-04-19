@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { REQUIRED_FIELDS, PKG_NAME_PATTERN, ExcelRow, ValidationError, ImportResult } from '../types';
+import { REQUIRED_FIELDS, ExcelRow, ValidationError, ImportResult } from '../types';
 
 /** 核心校验逻辑：接收二进制数据和文件名，返回 ImportResult */
 function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
@@ -11,7 +11,7 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
     if (jsonData.length === 0) {
       return {
         success: false, fileName, rows: [], headers: [],
-        headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0,
+        headerOrder: [], fenbiaoNames: [], totalRows: 0,
         errors: [{ type: 'missing_fields', message: '表格为空或无法读取数据' }]
       };
     }
@@ -37,39 +37,29 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
       });
       return {
         success: false, fileName, rows: jsonData, headers,
-        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, errors
+        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, errors
       };
     }
 
-    // 2. 分包名称校验（支持预分配行）
-    const preAllocIndices = new Set<number>();
-    const invalidPkgNames: string[] = [];
-    jsonData.forEach((row, idx) => {
+    // 2. 分包状态校验
+    const hasPackage = jsonData.some(row => {
       const v = row['分包名称'];
-      const str = String(v ?? '').trim();
-      if (str === '') return; // 空值，待拆分行
-      if (PKG_NAME_PATTERN.test(str)) {
-        preAllocIndices.add(idx); // 合法预分配行
-      } else {
-        invalidPkgNames.push(`第 ${idx + 2} 行分包名称“${str}”格式不合法（应为“包N”或留空）`);
-      }
+      return v !== undefined && v !== null && String(v).trim() !== '';
     });
-    if (invalidPkgNames.length > 0) {
+    if (hasPackage) {
       errors.push({
-        type: 'pre_alloc_invalid',
-        message: `发现 ${invalidPkgNames.length} 行分包名称格式不合法`,
-        details: invalidPkgNames
+        type: 'already_packed',
+        message: '该表已完成分包，无需再分包'
       });
       return {
         success: false, fileName, rows: jsonData, headers,
-        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, errors
+        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, errors
       };
     }
 
-    // 3. 网省采购申请号唯一性校验（仅对非预分配行）
+    // 3. 网省采购申请号唯一性校验
     const idMap = new Map<string, number>();
-    jsonData.forEach((row, idx) => {
-      if (preAllocIndices.has(idx)) return; // 预分配行豁免
+    jsonData.forEach(row => {
       const id = String(row['网省采购申请号'] ?? '').trim();
       if (id) idMap.set(id, (idMap.get(id) || 0) + 1);
     });
@@ -77,12 +67,12 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
     if (duplicates.length > 0) {
       errors.push({
         type: 'duplicate_申请号',
-        message: `发现 ${duplicates.length} 个重复的网省采购申请号（不含预分配行）`,
+        message: `发现 ${duplicates.length} 个重复的网省采购申请号`,
         details: duplicates.map(([id, count]) => `${id} (出现 ${count} 次)`)
       });
       return {
         success: false, fileName, rows: jsonData, headers,
-        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, errors
+        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, errors
       };
     }
 
@@ -107,7 +97,7 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
       });
       return {
         success: false, fileName, rows: jsonData, headers,
-        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, preAllocatedCount: 0, errors
+        headerOrder, fenbiaoNames: [], totalRows: jsonData.length, errors
       };
     }
 
@@ -121,12 +111,12 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
 
     return {
       success: true, fileName, rows: jsonData, headers,
-      headerOrder, fenbiaoNames, totalRows: jsonData.length, preAllocatedCount: preAllocIndices.size, errors: []
+      headerOrder, fenbiaoNames, totalRows: jsonData.length, errors: []
     };
   } catch (err) {
     return {
       success: false, fileName, rows: [], headers: [],
-      headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0,
+      headerOrder: [], fenbiaoNames: [], totalRows: 0,
       errors: [{ type: 'missing_fields', message: `读取文件失败: ${err}` }]
     };
   }
@@ -143,7 +133,7 @@ export function readAndValidate(file: File): Promise<ImportResult> {
     reader.onerror = () => {
       resolve({
         success: false, fileName: file.name, rows: [], headers: [],
-        headerOrder: [], fenbiaoNames: [], totalRows: 0, preAllocatedCount: 0,
+        headerOrder: [], fenbiaoNames: [], totalRows: 0,
         errors: [{ type: 'missing_fields', message: '文件读取失败' }]
       });
     };

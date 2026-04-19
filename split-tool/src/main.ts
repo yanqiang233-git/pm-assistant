@@ -8,12 +8,12 @@ import {
 } from './template/manager';
 import { parseSingleColumnPaste, parseTwoColumnPaste } from './config/paste';
 import { createInitialState, createFenbiaoConfigs, updateGlobalMethod, saveStateSnapshot } from './store/state';
-import { yuanToInt } from './split/precision';
+import { yuanToFen } from './split/precision';
 import {
   ensureModuleDirs,
   mirrorImportFile, mirrorTemplate, mirrorUploadedTemplate, mirrorExportResult,
   saveModuleState, loadModuleState, loadLatestImportFile
-} from '../../shared/store/project-files';
+} from './shared/store/project-files';
 import type {
   AppState, FenbiaoConfig, SplitMethod, RatioTemplate,
   ImportResult, PasteResult, ExcelRow
@@ -130,7 +130,7 @@ function renderImportResult(r: ImportResult) {
     importInfo.innerHTML = `
       <strong>文件：</strong>${esc(r.fileName)} &nbsp;|&nbsp;
       <strong>数据行数：</strong>${r.totalRows} &nbsp;|&nbsp;
-      <strong>唯一分标数：</strong>${r.fenbiaoNames.length}${r.preAllocatedCount > 0 ? ` &nbsp;|&nbsp; <strong>预分配行数：</strong>${r.preAllocatedCount}` : ''}
+      <strong>唯一分标数：</strong>${r.fenbiaoNames.length}
     `;
     importInfo.classList.remove('hidden');
     importErrors.classList.add('hidden');
@@ -290,9 +290,9 @@ function showPasteResult(r: PasteResult) {
 }
 
 // ============ Template download/import ============
-btnDownloadTpl.addEventListener('click', async () => {
+btnDownloadTpl.addEventListener('click', () => {
   if (!state.importResult) return;
-  const buf = await downloadConfigTemplate(state.importResult.fenbiaoNames);
+  const buf = downloadConfigTemplate(state.importResult.fenbiaoNames);
   mirrorTemplate(buf, 'pkg');
 });
 
@@ -369,7 +369,7 @@ function renderSplitMethod() {
       }
     } else if (c.splitMethod === 'fixedAmount') {
       if (c.fixedAmounts?.length) {
-        tplInfo = c.fixedAmounts.map(a => (a / 10000).toFixed(2)).join(' + ');
+        tplInfo = c.fixedAmounts.map(a => (a / 100).toFixed(2)).join(' + ');
       } else {
         tplInfo = '<span style="color:var(--color-warning)">待配置</span>';
       }
@@ -455,13 +455,13 @@ function getFenbiaoTotals(): Map<string, number> {
   const totals = new Map<string, number>();
   for (const row of state.importResult?.rows ?? []) {
     const name = String(row['分标名称'] ?? '').trim();
-    const price = yuanToInt(Number(row['估算总价（元）'] ?? 0));
+    const price = yuanToFen(Number(row['估算总价（元）'] ?? 0));
     totals.set(name, (totals.get(name) || 0) + price);
   }
   return totals;
 }
 
-btnDownloadSplitTpl.addEventListener('click', async () => {
+btnDownloadSplitTpl.addEventListener('click', () => {
   if (!state.importResult) return;
   const validConfigs = state.fenbiaoConfigs.filter(c => c.packageCount >= 1);
   if (validConfigs.length === 0) {
@@ -470,7 +470,7 @@ btnDownloadSplitTpl.addEventListener('click', async () => {
   }
   const templates = loadTemplates();
   const totals = getFenbiaoTotals();
-  const buf = await downloadSplitConfigTemplate(validConfigs, state.globalSplitMethod, totals, templates);
+  const buf = downloadSplitConfigTemplate(validConfigs, state.globalSplitMethod, totals, templates);
   mirrorTemplate(buf, 'split');
 });
 
@@ -576,16 +576,16 @@ function openFixedAmountModal(configIdx: number) {
   const total = rows
     .filter(r => String(r['分标名称'] ?? '').trim() === config.name)
     .reduce((s, r) => s + Number(r['估算总价（元）'] ?? 0), 0);
-  const totalRounded = Math.round(total * 10000) / 10000;
+  const totalRounded = Math.round(total * 100) / 100;
 
   fixedAmountTitle.textContent = `${config.name} - 指定每包金额`;
-  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别指定金额，总和需等于 ${totalRounded} 元`;
-  fixedAmountTarget.textContent = String(totalRounded);
+  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别指定金额，总和需等于 ${totalRounded.toFixed(2)} 元`;
+  fixedAmountTarget.textContent = totalRounded.toFixed(2);
 
   let html = '';
   for (let i = 0; i < config.packageCount; i++) {
-    const existing = config.fixedAmounts?.[i] ? String(config.fixedAmounts[i] / 10000) : '';
-    html += `<div class="fa-row"><label>包${i + 1}：</label><input type="number" step="0.0001" class="fa-input" value="${existing}" /> 元</div>`;
+    const existing = config.fixedAmounts?.[i] ? (config.fixedAmounts[i] / 100).toFixed(2) : '';
+    html += `<div class="fa-row"><label>包${i + 1}：</label><input type="number" step="0.01" class="fa-input" value="${existing}" /> 元</div>`;
   }
   fixedAmountInputs.innerHTML = html;
   updateFixedAmountSum();
@@ -599,12 +599,12 @@ function updateFixedAmountSum() {
   const inputs = fixedAmountInputs.querySelectorAll('.fa-input') as NodeListOf<HTMLInputElement>;
   let sum = 0;
   inputs.forEach(inp => { sum += Number(inp.value) || 0; });
-  const sumRounded = Math.round(sum * 10000) / 10000;
+  const sumRounded = Math.round(sum * 100) / 100;
   const target = parseFloat(fixedAmountTarget.textContent || '0');
-  const diff = Math.round((sumRounded - target) * 10000) / 10000;
-  fixedAmountSum.textContent = String(sumRounded);
-  fixedAmountDiff.textContent = String(diff);
-  fixedAmountDiff.style.color = Math.abs(diff) < 0.00005 ? 'var(--color-success)' : 'var(--color-danger)';
+  const diff = Math.round((sumRounded - target) * 100) / 100;
+  fixedAmountSum.textContent = sumRounded.toFixed(2);
+  fixedAmountDiff.textContent = diff.toFixed(2);
+  fixedAmountDiff.style.color = Math.abs(diff) < 0.005 ? 'var(--color-success)' : 'var(--color-danger)';
 }
 
 function closeFixedAmountModal() { fixedAmountModal.classList.add('hidden'); }
@@ -616,13 +616,13 @@ fixedAmountOk.addEventListener('click', () => {
   const amounts: number[] = [];
   let sum = 0;
   inputs.forEach(inp => {
-    const v = Math.round(Number(inp.value || 0) * 10000);
+    const v = Math.round(Number(inp.value || 0) * 100);
     amounts.push(v);
     sum += v;
   });
-  const targetInt = Math.round(target * 10000);
-  if (sum !== targetInt) {
-    alert(`金额总和 ${sum / 10000} 与目标 ${target} 不一致，差额 ${(sum - targetInt) / 10000} 元`);
+  const targetFen = Math.round(target * 100);
+  if (sum !== targetFen) {
+    alert(`金额总和 ${(sum / 100).toFixed(2)} 与目标 ${target.toFixed(2)} 不一致，差额 ${((sum - targetFen) / 100).toFixed(2)} 元`);
     return;
   }
   state.fenbiaoConfigs[fixedAmountConfigIdx].fixedAmounts = amounts;
@@ -872,14 +872,14 @@ function renderExportSummary() {
   exportStatus.className = 'status-badge success';
 }
 
-btnExport.addEventListener('click', async () => {
+btnExport.addEventListener('click', () => {
   if (!state.splitResult || !state.importResult) {
     alert('请先执行拆分并预览');
     return;
   }
   try {
     const outName = state.importResult.fileName.replace(/\.xlsx$/i, '') + '_拆分结果.xlsx';
-    const buf = await exportToXlsx(state.splitResult, state.importResult.headerOrder, outName);
+    const buf = exportToXlsx(state.splitResult, state.importResult.headerOrder, outName);
     mirrorExportResult(buf);
     exportStatus.textContent = '已导出';
     exportStatus.className = 'status-badge success';
