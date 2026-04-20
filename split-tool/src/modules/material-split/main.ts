@@ -798,14 +798,19 @@ btnExecuteSplit.addEventListener('click', () => {
     return;
   }
 
-  const templates = loadTemplates();
-  state.splitResult = executeSplit(state.importResult!.rows, state.fenbiaoConfigs, templates);
-  state.previewSummary = generatePreviewSummary(
-    state.importResult!.rows, state.splitResult, state.fenbiaoConfigs
-  );
-  previewPage = 0;
-  renderPreview();
-  saveStateSnapshot(state);
+  try {
+    const templates = loadTemplates();
+    state.splitResult = executeSplit(state.importResult!.rows, state.fenbiaoConfigs, templates);
+    state.previewSummary = generatePreviewSummary(
+      state.importResult!.rows, state.splitResult, state.fenbiaoConfigs
+    );
+    previewPage = 0;
+    renderPreview();
+    saveStateSnapshot(state);
+  } catch (err) {
+    clearPreview();
+    alert(`拆分失败: ${err instanceof Error ? err.message : String(err)}`);
+  }
 });
 
 function renderPreview() {
