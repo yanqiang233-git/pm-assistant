@@ -1,5 +1,5 @@
 import { readAndValidate, readAndValidateBuffer } from './excel/reader';
-import { exportToXlsx, downloadConfigTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
+import { exportToXlsx, exportOriginalAsText, downloadConfigTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
 import { executeSplit, generatePreviewSummary } from './split/engine';
 import {
   loadTemplates, saveTemplates, addTemplate, updateTemplate,
@@ -28,6 +28,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 
 const fileInput = $<HTMLInputElement>('fileInput');
 const btnImport = $('btnImport');
+const btnExportTextOriginal = $('btnExportTextOriginal');
 const importStatus = $('importStatus');
 const importInfo = $('importInfo');
 const importErrors = $('importErrors');
@@ -134,6 +135,7 @@ function renderImportResult(r: ImportResult) {
     `;
     importInfo.classList.remove('hidden');
     importErrors.classList.add('hidden');
+    btnExportTextOriginal.classList.remove('hidden');
     // 初始化分标配置
     state.fenbiaoConfigs = createFenbiaoConfigs(r.fenbiaoNames, state.globalSplitMethod);
     initialConfigs = state.fenbiaoConfigs.map(c => ({ ...c }));
@@ -157,12 +159,24 @@ function renderImportResult(r: ImportResult) {
     }
     importErrors.innerHTML = html;
     importErrors.classList.remove('hidden');
+    btnExportTextOriginal.classList.add('hidden');
     disableModule(sectionPkgConfig);
     disableModule(sectionSplitMethod);
     disableModule(sectionPreview);
     disableModule(sectionExport);
   }
 }
+
+// ============ Export Text Original ============
+btnExportTextOriginal.addEventListener('click', async () => {
+  if (!state.importResult?.success) return;
+  try {
+    const outName = state.importResult.fileName.replace(/\.xlsx$/i, '') + '_文本格式.xlsx';
+    await exportOriginalAsText(state.importResult.rows, state.importResult.headerOrder, outName);
+  } catch (err) {
+    alert(`导出失败: ${err}`);
+  }
+});
 
 // ============ Package Config ============
 function renderPkgConfig() {

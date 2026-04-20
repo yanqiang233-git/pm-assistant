@@ -91,6 +91,52 @@ async function saveToFile(data: Uint8Array, filename: string): Promise<void> {
 /** 数值字段集合：导出时转为 Number 便于 Excel 直接 SUM() */
 const NUMERIC_EXPORT_FIELDS = new Set(['估算总价（元）', '数量', '估算单价（元）']);
 
+/** 将原始数据导出为文本格式 xlsx（数量/单价/总价列为文本单元格） */
+export async function exportOriginalAsText(
+  rows: SplitRow[],
+  headerOrder: string[],
+  outputFileName: string
+): Promise<Uint8Array> {
+  const wsData: unknown[][] = [headerOrder];
+  for (const row of rows) {
+    const line: unknown[] = headerOrder.map(h => {
+      const val = row[h] ?? '';
+      // 数值字段保持文本字符串，确保不丢失精度
+      if (NUMERIC_EXPORT_FIELDS.has(h) && val !== '' && val != null) {
+        return String(val);
+      }
+      return val;
+    });
+    wsData.push(line);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  // 强制数值字段单元格为文本类型
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  const numColIndices: number[] = [];
+  for (let c = range.s.c; c <= range.e.c; c++) {
+    const headerCell = ws[XLSX.utils.encode_cell({ r: 0, c })];
+    if (headerCell && NUMERIC_EXPORT_FIELDS.has(String(headerCell.v))) {
+      numColIndices.push(c);
+    }
+  }
+  for (let r = 1; r <= range.e.r; r++) {
+    for (const c of numColIndices) {
+      const ref = XLSX.utils.encode_cell({ r, c });
+      const cell = ws[ref];
+      if (cell) {
+        cell.t = 's'; // 强制文本类型
+        cell.v = String(cell.v);
+        delete cell.w;
+      }
+    }
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+  const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  await saveToFile(data, outputFileName);
+  return data;
+}
+
 /** 将拆分结果写入 xlsx 并下载，同时返回二进制数据用于项目目录镜像 */
 export async function exportToXlsx(
   rows: SplitRow[],
