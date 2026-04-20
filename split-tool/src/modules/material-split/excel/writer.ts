@@ -7,7 +7,6 @@ import {
   decimalToBigInt,
   getMaxDecimalScale,
   isDecimalAbsLessThan,
-  isStrictlyDescendingDecimalStrings,
   normalizeDecimalString,
   splitAverageBigInt,
   subtractDecimalStrings,
@@ -26,29 +25,18 @@ function adjustFixedAmountsToTarget(amountValues: string[], targetAmount: string
     throw new Error(`金额总和${amountSum}元与分标总金额${targetAmount}元差额${subtractDecimalStrings(amountSum, targetAmount)}元，超过允许偏差${AMOUNT_TOLERANCE}元`);
   }
 
+  // 正向差额（模板偏小）→ 补到包1；负向差额（模板偏大）→ 从最末包扣除
   const adjusted = [...amountValues];
   if (compareDecimalStrings(diff, '0') > 0) {
     adjusted[0] = addDecimalStrings(adjusted[0] ?? '0', diff);
   } else {
-    let remainToDeduct = diff.slice(1);
-    for (let index = adjusted.length - 1; index >= 0 && compareDecimalStrings(remainToDeduct, '0') > 0; index--) {
-      const current = adjusted[index] ?? '0';
-      if (compareDecimalStrings(current, remainToDeduct) >= 0) {
-        adjusted[index] = subtractDecimalStrings(current, remainToDeduct);
-        remainToDeduct = '0';
-        break;
-      }
-      adjusted[index] = '0';
-      remainToDeduct = subtractDecimalStrings(remainToDeduct, current);
+    const absDiff = diff.slice(1); // 去掉负号
+    const lastIdx = adjusted.length - 1;
+    const lastVal = adjusted[lastIdx] ?? '0';
+    if (compareDecimalStrings(lastVal, absDiff) < 0) {
+      throw new Error(`金额总和${amountSum}元与分标总金额${targetAmount}元差额${subtractDecimalStrings(amountSum, targetAmount)}元无法从最末包扣除，请调整模板金额`);
     }
-
-    if (compareDecimalStrings(remainToDeduct, '0') > 0) {
-      throw new Error(`金额总和${amountSum}元与分标总金额${targetAmount}元差额${subtractDecimalStrings(amountSum, targetAmount)}元无法自动分摊，请调整模板金额`);
-    }
-  }
-
-  if (!isStrictlyDescendingDecimalStrings(adjusted)) {
-    throw new Error('自动补齐尾差后，仍未满足包序号越小金额越大，请调整模板金额');
+    adjusted[lastIdx] = subtractDecimalStrings(lastVal, absDiff);
   }
 
   return { adjusted, diff };

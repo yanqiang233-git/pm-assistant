@@ -8,7 +8,7 @@ import {
 } from './template/manager';
 import { parseSingleColumnPaste, parseTwoColumnPaste } from './config/paste';
 import { createInitialState, createFenbiaoConfigs, updateGlobalMethod, saveStateSnapshot } from './store/state';
-import { compareDecimalStrings, isStrictlyDescendingDecimalStrings, normalizeDecimalString, subtractDecimalStrings, sumDecimalStrings } from './split/precision';
+import { compareDecimalStrings, normalizeDecimalString, subtractDecimalStrings, sumDecimalStrings } from './split/precision';
 import {
   ensureModuleDirs,
   mirrorImportFile, mirrorTemplate, mirrorUploadedTemplate, mirrorExportResult,
@@ -579,7 +579,7 @@ function openFixedAmountModal(configIdx: number) {
   const totalExact = state.importResult?.exactFenbiaoAmountTotals[config.name] ?? '0';
 
   fixedAmountTitle.textContent = `${config.name} - 指定每包金额`;
-  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别指定金额，总和需等于 ${totalExact} 元，且包序号越小金额越大`;
+  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别指定金额，总和需等于 ${totalExact} 元`;
   fixedAmountTarget.textContent = totalExact;
 
   let html = '';
@@ -625,10 +625,6 @@ fixedAmountOk.addEventListener('click', () => {
   const diff = subtractDecimalStrings(sum, target);
   if (compareDecimalStrings(diff, '0') !== 0) {
     alert(`金额总和 ${sum} 与目标 ${target} 不一致，差额 ${diff} 元`);
-    return;
-  }
-  if (!isStrictlyDescendingDecimalStrings(amounts)) {
-    alert('金额需满足包序号越小金额越大');
     return;
   }
   state.fenbiaoConfigs[fixedAmountConfigIdx].fixedAmounts = amounts;
