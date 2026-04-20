@@ -20,6 +20,18 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const jsonData = XLSX.utils.sheet_to_json<ExcelRow>(sheet, { defval: '' });
+
+    // 将数值字段转为文本字符串，避免 IEEE 754 浮点精度干扰
+    const NUMERIC_FIELDS = ['估算总价（元）', '数量', '估算单价（元）'];
+    for (const row of jsonData) {
+      for (const field of NUMERIC_FIELDS) {
+        const val = row[field];
+        if (val != null && val !== '' && typeof val === 'number') {
+          row[field] = normalizeDecimalString(val) ?? String(val);
+        }
+      }
+    }
+
     if (jsonData.length === 0) {
       return {
         success: false, fileName, rows: [], headers: [],

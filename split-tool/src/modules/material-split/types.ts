@@ -93,7 +93,7 @@ export interface PreviewSummary {
     originalRows: number;
     packageCount: number;
     splitRows: number;
-    totalAmount: number;
+    totalAmount: string;
   }[];
 }
 
