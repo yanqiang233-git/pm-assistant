@@ -3,7 +3,6 @@ import {
   RatioTemplate, PreviewSummary, PKG_NAME_PATTERN
 } from '../types';
 import {
-  adjustLastBigIntItem,
   bigIntToDecimalString,
   decimalToBigInt,
   getMaxDecimalScale,
@@ -12,6 +11,10 @@ import {
   splitBigIntByRatio,
   sumDecimalStrings
 } from './precision';
+
+/** 输出精度：金额保留 2 位小数，数量保留 3 位小数 */
+const AMOUNT_OUTPUT_SCALE = 2;
+const QTY_OUTPUT_SCALE = 3;
 
 function getNormalizedDecimal(row: ExcelRow, field: string): string {
   return normalizeDecimalString(row[field]) ?? '0';
@@ -22,11 +25,68 @@ function sumBigInt(values: bigint[]): bigint {
 }
 
 /**
+ * 将 BigInt 值从 srcScale 四舍五入到 dstScale（dstScale ≤ srcScale）
+ * 返回在 dstScale 下的 BigInt
+ */
+function roundBigIntToScale(value: bigint, srcScale: number, dstScale: number): bigint {
+  if (dstScale >= srcScale) return value;
+  const factor = 10n ** BigInt(srcScale - dstScale);
+  const sign = value < 0n ? -1n : 1n;
+  const abs = value < 0n ? -value : value;
+  return sign * ((abs + factor / 2n) / factor);
+}
+
+/**
+ * 对一组 BigInt 值执行四舍五入，然后校验加和并补齐差值。
+ * 补齐方向：包号小的金额更大（即优先给前面的包加 1 最小单位）。
+ * @returns 在 dstScale 下的 BigInt 数组，保证 sum === targetInDstScale
+ */
+function roundAndReconcile(
+  values: bigint[],
+  srcScale: number,
+  dstScale: number,
+  targetInDstScale: bigint
+): bigint[] {
+  const rounded = values.map(v => roundBigIntToScale(v, srcScale, dstScale));
+  let diff = targetInDstScale - sumBigInt(rounded);
+  if (diff > 0n) {
+    // 需要增加 → 从包号小的开始加（包号小者金额更大）
+    for (let i = 0; diff > 0n && i < rounded.length; i++) {
+      rounded[i] += 1n;
+      diff -= 1n;
+    }
+  } else if (diff < 0n) {
+    // 需要减少 → 从包号大的开始减（包号小者金额更大）
+    for (let i = rounded.length - 1; diff < 0n && i >= 0; i--) {
+      rounded[i] -= 1n;
+      diff += 1n;
+    }
+  }
+  return rounded;
+}
+
+function assertRoundedSum(
+  values: bigint[],
+  target: bigint,
+  scale: number,
+  fieldLabel: string,
+  contextLabel: string
+): void {
+  const sum = sumBigInt(values);
+  if (sum !== target) {
+    throw new Error(
+      `${contextLabel}${fieldLabel}在保留${scale}位小数后合计不等于原值：拆分合计${bigIntToDecimalString(sum, scale)}，原值${bigIntToDecimalString(target, scale)}`
+    );
+  }
+}
+
+/**
  * 执行全部拆分
- * 三层兜底保证拆分后总和严格等于拆分前：
- * ① 转换层：最后一行吸收 round 累积误差
- * ② 行内拆分：splitByRatio / splitAverage 的 floor+余数保证
- * ③ 包级：最后一个待拆行用减法兜底
+ * 全部使用 BigInt 精确运算，拆分后输出固定精度（金额2位/数量3位），
+ * 四舍五入后校验加和，差值补齐到包号最小的包。
+ * 保证：
+ * - 每行拆分后各包金额/数量 sum === 原始行值（十进制精确）
+ * - 每分标拆分后所有行 sum === 原始分标总和（十进制精确）
  */
 export function executeSplit(
   rows: ExcelRow[],
@@ -59,8 +119,6 @@ export function executeSplit(
 
     const n = config.packageCount;
 
-    const fbResultStart = result.length;
-
     // ── 分离预分配行与待拆行 ──
     const preAllocRows: ExcelRow[] = [];
     const toSplitRows: ExcelRow[] = [];
@@ -84,24 +142,20 @@ export function executeSplit(
       }
     }
 
-    // ── 输出预分配行（自动补分包编号）──
+    // ── 计算精度参数 ──
     const amountDecimals = fbRows.map(row => getNormalizedDecimal(row, '估算总价（元）'));
     const qtyDecimals = fbRows.map(row => getNormalizedDecimal(row, '数量'));
-    // amountScale 仅由数据行决定，不受配置模板浮点噪声膨胀
-    const amountScale = getMaxDecimalScale(amountDecimals);
-    const qtyScale = getMaxDecimalScale(qtyDecimals);
+    // 内部运算精度：取数据实际精度与输出精度的较大值
+    const amountScale = Math.max(getMaxDecimalScale(amountDecimals), AMOUNT_OUTPUT_SCALE);
+    const qtyScale = Math.max(getMaxDecimalScale(qtyDecimals), QTY_OUTPUT_SCALE);
 
-    const preAllocAmountPerPkg = new Array<bigint>(n).fill(0n);
-    const preAllocQtyPerPkg = new Array<bigint>(n).fill(0n);
+    // ── 输出预分配行（自动补分包编号）──
     for (const row of preAllocRows) {
       const match = PKG_NAME_PATTERN.exec(String(row['分包名称']).trim())!;
       const pkgNum = parseInt(match[1]);
-      const pkgIdx = pkgNum - 1;
       const newRow: SplitRow = { ...row };
       newRow['分包编号'] = `JS${pkgNum * 100}`;
       result.push(newRow);
-      preAllocAmountPerPkg[pkgIdx] += decimalToBigInt(getNormalizedDecimal(row, '估算总价（元）'), amountScale);
-      preAllocQtyPerPkg[pkgIdx] += decimalToBigInt(getNormalizedDecimal(row, '数量'), qtyScale);
     }
 
     // 若该分标无待拆行，跳过后续拆分逻辑
@@ -111,183 +165,90 @@ export function executeSplit(
     const fbTotalAmount = sumBigInt(amountDecimals.map(value => decimalToBigInt(value, amountScale)));
     const fbTotalQty = sumBigInt(qtyDecimals.map(value => decimalToBigInt(value, qtyScale)));
 
-    // ── 计算每包目标金额/数量 ──
-    let packageTargetAmounts: bigint[];
-    let packageTargetQtys: bigint[];
     const method: SplitMethod = config.splitMethod;
-
-    if (method === 'average') {
-      packageTargetAmounts = splitAverageBigInt(fbTotalAmount, n);
-      packageTargetQtys = splitAverageBigInt(fbTotalQty, n);
-    } else if (method === 'ratio' && config.templateId) {
-      const tpl = templateMap.get(config.templateId);
-      const ratios = tpl?.ratios ?? Array(n).fill(1);
-      packageTargetAmounts = splitBigIntByRatio(fbTotalAmount, ratios);
-      packageTargetQtys = splitBigIntByRatio(fbTotalQty, ratios);
-    } else if (method === 'fixedAmount' && config.fixedAmounts) {
-      // 将指定金额四舍五入到 amountScale，消除配置模板的浮点噪声
-      packageTargetAmounts = config.fixedAmounts.map(v => {
-        const vScale = getMaxDecimalScale([v]);
-        if (vScale <= amountScale) return decimalToBigInt(v, amountScale);
-        const factor = 10n ** BigInt(vScale - amountScale);
-        return (decimalToBigInt(v, vScale) + factor / 2n) / factor;
-      });
-      // 最后一包用减法兜底，确保总和严格相等
-      const sumOfRest = sumBigInt(packageTargetAmounts.slice(0, -1));
-      packageTargetAmounts[packageTargetAmounts.length - 1] = fbTotalAmount - sumOfRest;
-      packageTargetQtys = splitBigIntByRatio(fbTotalQty, packageTargetAmounts);
-    } else {
-      packageTargetAmounts = splitAverageBigInt(fbTotalAmount, n);
-      packageTargetQtys = splitAverageBigInt(fbTotalQty, n);
-    }
-
-    // ── 计算每包剩余预算 ──
-    const remainBudgetAmount = packageTargetAmounts.map(
-      (t, i) => t - preAllocAmountPerPkg[i]
-    );
-    const remainBudgetQty = packageTargetQtys.map(
-      (t, i) => t - preAllocQtyPerPkg[i]
-    );
-
-    // 检查预占是否超标
-    for (let i = 0; i < n; i++) {
-      if (remainBudgetAmount[i] < 0n) {
-        throw new Error(
-          `分标"${fbName}"包${i + 1}的预分配金额(${bigIntToDecimalString(preAllocAmountPerPkg[i], amountScale)})` +
-          `超过目标金额(${bigIntToDecimalString(packageTargetAmounts[i], amountScale)})`
-        );
-      }
-    }
-
-    // ── 层级①：转换层兜底 ──
-    // 各行独立 round 后累加可能 ≠ 总和 round，调整最后一行吸收差值
+    // 待拆行按“逐行独立拆分”处理：
+    // 预分配行仅原样保留并计入总量，不再占用后续待拆行的包级预算。
     const rowAmountsInt = toSplitRows.map(
       row => decimalToBigInt(getNormalizedDecimal(row, '估算总价（元）'), amountScale)
     );
     const rowQtysInt = toSplitRows.map(
       row => decimalToBigInt(getNormalizedDecimal(row, '数量'), qtyScale)
     );
-    const toSplitTotalAmount = sumBigInt(remainBudgetAmount);
-    const toSplitTotalQty = sumBigInt(remainBudgetQty);
-    adjustLastBigIntItem(rowAmountsInt, toSplitTotalAmount);
-    adjustLastBigIntItem(rowQtysInt, toSplitTotalQty);
-
-    // ── 拆分待拆行 ──
-    const accumulatedPerPkg = new Array<bigint>(n).fill(0n);
-    const accumulatedQtyPerPkg = new Array<bigint>(n).fill(0n);
-    // 记录每行最后一包在 result 中的索引，供分标级分散兜底使用
-    const rowLastPkgResultIndices: number[] = [];
 
     for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
       const row = toSplitRows[rowIdx];
-      const isLastRow = rowIdx === toSplitRows.length - 1;
       const rowAmountInt = rowAmountsInt[rowIdx];
       const rowQtyInt = rowQtysInt[rowIdx];
 
       let priceShares: bigint[];
       let qtyShares: bigint[];
 
-      if (isLastRow) {
-        // 层级③：尾行用减法兜底 → 确保每包总和严格等于目标
-        priceShares = remainBudgetAmount.map(
-          (budget, i) => budget - accumulatedPerPkg[i]
-        );
-        qtyShares = remainBudgetQty.map(
-          (budget, i) => budget - accumulatedQtyPerPkg[i]
-        );
-      } else {
-        // 层级②：行内拆分（splitByRatio/splitAverage 保证 sum = total）
-        if (method === 'average') {
-          priceShares = splitAverageBigInt(rowAmountInt, n);
-          qtyShares = splitAverageBigInt(rowQtyInt, n);
-        } else if (method === 'ratio' && config.templateId) {
-          const tpl = templateMap.get(config.templateId);
-          const ratios = tpl?.ratios ?? Array(n).fill(1);
-          priceShares = splitBigIntByRatio(rowAmountInt, ratios);
-          qtyShares = splitBigIntByRatio(rowQtyInt, ratios);
-        } else if (method === 'fixedAmount' && config.fixedAmounts) {
-          const weights = config.fixedAmounts.map(value => decimalToBigInt(value, amountScale));
-          priceShares = splitBigIntByRatio(rowAmountInt, weights);
-          qtyShares = splitBigIntByRatio(rowQtyInt, weights);
-        } else {
-          priceShares = splitAverageBigInt(rowAmountInt, n);
-          qtyShares = splitAverageBigInt(rowQtyInt, n);
+      if (method === 'average') {
+        priceShares = splitAverageBigInt(rowAmountInt, n);
+        qtyShares = splitAverageBigInt(rowQtyInt, n);
+      } else if (method === 'ratio' && config.templateId) {
+        const tpl = templateMap.get(config.templateId);
+        const ratios = tpl?.ratios ?? Array(n).fill(1);
+        priceShares = splitBigIntByRatio(rowAmountInt, ratios);
+        qtyShares = splitBigIntByRatio(rowQtyInt, ratios);
+      } else if (method === 'fixedAmount' && config.fixedAmounts) {
+        const weightScale = Math.max(amountScale, getMaxDecimalScale(config.fixedAmounts));
+        const weights = config.fixedAmounts.map(value => decimalToBigInt(value, weightScale));
+        if (sumBigInt(weights) === 0n) {
+          throw new Error(`分标"${fbName}"的参考金额不能全为 0`);
         }
+        priceShares = splitBigIntByRatio(rowAmountInt, weights);
+        qtyShares = splitBigIntByRatio(rowQtyInt, weights);
+      } else {
+        priceShares = splitAverageBigInt(rowAmountInt, n);
+        qtyShares = splitAverageBigInt(rowQtyInt, n);
       }
 
-      const rowSplitStart = result.length;
+      // 行级是唯一硬约束：每行 round 后必须严格回到原行金额/数量。
+      const amtTarget = roundBigIntToScale(rowAmountInt, amountScale, AMOUNT_OUTPUT_SCALE);
+      const qtyTarget = roundBigIntToScale(rowQtyInt, qtyScale, QTY_OUTPUT_SCALE);
+
+      const roundedAmts = roundAndReconcile(priceShares, amountScale, AMOUNT_OUTPUT_SCALE, amtTarget);
+      const roundedQtys = roundAndReconcile(qtyShares, qtyScale, QTY_OUTPUT_SCALE, qtyTarget);
+
+      // ── 包号降序修复：确保包号小者金额 ≥ 包号大者 ──
+      // 四舍五入/补齐可能产生相邻包逆序（差1个最小单位），通过冒泡排序修复
+      for (let pass = 0; pass < roundedAmts.length - 1; pass++) {
+        let swapped = false;
+        for (let i = 0; i < roundedAmts.length - 1 - pass; i++) {
+          if (roundedAmts[i] < roundedAmts[i + 1]) {
+            [roundedAmts[i], roundedAmts[i + 1]] = [roundedAmts[i + 1], roundedAmts[i]];
+            [roundedQtys[i], roundedQtys[i + 1]] = [roundedQtys[i + 1], roundedQtys[i]];
+            swapped = true;
+          }
+        }
+        if (!swapped) break;
+      }
+
+      assertRoundedSum(
+        roundedAmts,
+        amtTarget,
+        AMOUNT_OUTPUT_SCALE,
+        '金额',
+        `分标"${fbName}"第${rowIdx + 1}条待拆行：`
+      );
+      assertRoundedSum(
+        roundedQtys,
+        qtyTarget,
+        QTY_OUTPUT_SCALE,
+        '数量',
+        `分标"${fbName}"第${rowIdx + 1}条待拆行：`
+      );
+
       for (let i = 0; i < n; i++) {
         const newRow: SplitRow = { ...row };
         newRow['分包名称'] = `包${i + 1}`;
         newRow['分包编号'] = `JS${(i + 1) * 100}`;
-        newRow['估算总价（元）'] = bigIntToDecimalString(priceShares[i], amountScale);
-        newRow['数量'] = bigIntToDecimalString(qtyShares[i], qtyScale);
+        newRow['估算总价（元）'] = bigIntToDecimalString(roundedAmts[i], AMOUNT_OUTPUT_SCALE);
+        newRow['数量'] = bigIntToDecimalString(roundedQtys[i], QTY_OUTPUT_SCALE);
         result.push(newRow);
-        accumulatedPerPkg[i] += priceShares[i];
-        accumulatedQtyPerPkg[i] += qtyShares[i];
-      }
-
-      // ── 行级浮点兜底：确保每行 N 包的 Number 求和 = 原始行金额 ──
-      // 保证按「网省采购申请号」分组 SUM 时与原表严格一致
-      const rowSplitRows = result.slice(rowSplitStart, rowSplitStart + n);
-      for (const field of ['估算总价（元）', '数量'] as const) {
-        const origFloat = Number(row[field]);
-        let sumFirst = 0;
-        for (let j = 0; j < n - 1; j++) sumFirst += Number(rowSplitRows[j][field]);
-        const lastVal = origFloat - sumFirst;
-        rowSplitRows[n - 1][field] = normalizeDecimalString(lastVal) ?? String(lastVal);
-      }
-      rowLastPkgResultIndices.push(rowSplitStart + n - 1);
-    }
-
-    // ── 全局断言：验证拆分后金额总和 ──
-    const outputAmountTotal =
-      sumBigInt(preAllocAmountPerPkg) + sumBigInt(accumulatedPerPkg);
-    if (outputAmountTotal !== fbTotalAmount) {
-      throw new Error(
-        `内部错误：分标"${fbName}"拆分后金额总和(${bigIntToDecimalString(outputAmountTotal, amountScale)})≠原始总和(${bigIntToDecimalString(fbTotalAmount, amountScale)})`
-      );
-    }
-
-    const outputQtyTotal =
-      sumBigInt(preAllocQtyPerPkg) + sumBigInt(accumulatedQtyPerPkg);
-    if (outputQtyTotal !== fbTotalQty) {
-      throw new Error(
-        `内部错误：分标"${fbName}"拆分后数量总和(${bigIntToDecimalString(outputQtyTotal, qtyScale)})≠原始总和(${bigIntToDecimalString(fbTotalQty, qtyScale)})`
-      );
-    }
-
-    // ── 分标级浮点兜底：确保分标所有拆分行的 Number 求和 = 原始分标总和 ──
-    // 行级兜底解决了按行（网省采购申请号）的精度，但运行累加序不同于
-    // 原始表的累加序，可能导致分标级浮点总和微偏；
-    // 将偏差分散到多个原始行的末尾包（每行调整 < 1e-5），保持行级误差不可见。
-    const fbSplitRows = result.slice(fbResultStart);
-    if (fbSplitRows.length > 0) {
-      for (const field of ['估算总价（元）', '数量'] as const) {
-        const origFloatSum = fbRows.reduce((s, r) => s + Number(r[field]), 0);
-        let splitFloatSum = 0;
-        for (const r of fbSplitRows) splitFloatSum += Number(r[field]);
-        if (splitFloatSum !== origFloatSum) {
-          const diff = origFloatSum - splitFloatSum;
-          // 分散到不同原始行的末尾包，每行调整量控制在 5e-6 以内
-          const FLOAT_SPREAD_THRESHOLD = 5e-6;
-          const adjustableIndices = rowLastPkgResultIndices.length > 0
-            ? rowLastPkgResultIndices
-            : [fbResultStart + fbSplitRows.length - 1]; // fallback
-          const spreadCount = Math.min(
-            adjustableIndices.length,
-            Math.max(1, Math.ceil(Math.abs(diff) / FLOAT_SPREAD_THRESHOLD))
-          );
-          const perAdj = diff / spreadCount;
-          for (let k = adjustableIndices.length - spreadCount; k < adjustableIndices.length; k++) {
-            const r = result[adjustableIndices[k]];
-            const adjusted = Number(r[field]) + perAdj;
-            r[field] = normalizeDecimalString(adjusted) ?? String(adjusted);
-          }
-        }
       }
     }
-
   }
 
   return result;

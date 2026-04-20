@@ -1,7 +1,6 @@
 import * as XLSX from 'xlsx';
 import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate } from '../types';
 import {
-  addDecimalStrings,
   bigIntToDecimalString,
   compareDecimalStrings,
   decimalToBigInt,
@@ -16,31 +15,24 @@ import {
 
 const AMOUNT_TOLERANCE = '0.01';
 
-function adjustFixedAmountsToTarget(amountValues: string[], targetAmount: string): { adjusted: string[]; diff: string | null } {
-  const amountSum = sumDecimalStrings(amountValues);
-  const diff = subtractDecimalStrings(targetAmount, amountSum);
-  if (compareDecimalStrings(diff, '0') === 0) {
-    return { adjusted: amountValues, diff: null };
-  }
-  if (!isDecimalAbsLessThan(diff, AMOUNT_TOLERANCE)) {
-    throw new Error(`金额总和${amountSum}元与分标总金额${targetAmount}元差额${subtractDecimalStrings(amountSum, targetAmount)}元，超过允许偏差${AMOUNT_TOLERANCE}元`);
-  }
+const EXPORT_FIELD_FORMATTERS: Partial<Record<string, string>> = {
+  '估算总价（元）': '0.00',
+  '估算单价（元）': '0.00',
+  '数量': '0.000'
+};
 
-  // 正向差额（模板偏小）→ 补到包1；负向差额（模板偏大）→ 从最末包扣除
-  const adjusted = [...amountValues];
-  if (compareDecimalStrings(diff, '0') > 0) {
-    adjusted[0] = addDecimalStrings(adjusted[0] ?? '0', diff);
-  } else {
-    const absDiff = diff.slice(1); // 去掉负号
-    const lastIdx = adjusted.length - 1;
-    const lastVal = adjusted[lastIdx] ?? '0';
-    if (compareDecimalStrings(lastVal, absDiff) < 0) {
-      throw new Error(`金额总和${amountSum}元与分标总金额${targetAmount}元差额${subtractDecimalStrings(amountSum, targetAmount)}元无法从最末包扣除，请调整模板金额`);
+function applyExportNumberFormat(ws: XLSX.WorkSheet, headerOrder: string[], rowCount: number): void {
+  for (let colIndex = 0; colIndex < headerOrder.length; colIndex++) {
+    const format = EXPORT_FIELD_FORMATTERS[headerOrder[colIndex]];
+    if (!format) continue;
+    for (let rowIndex = 1; rowIndex < rowCount; rowIndex++) {
+      const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+      const cell = ws[cellRef];
+      if (cell?.t === 'n') {
+        cell.z = format;
+      }
     }
-    adjusted[lastIdx] = subtractDecimalStrings(lastVal, absDiff);
   }
-
-  return { adjusted, diff };
 }
 
 function applyMoneyNumberFormat(ws: XLSX.WorkSheet, rowCount: number, maxPkg: number): void {
@@ -91,52 +83,6 @@ async function saveToFile(data: Uint8Array, filename: string): Promise<void> {
 /** 数值字段集合：导出时转为 Number 便于 Excel 直接 SUM() */
 const NUMERIC_EXPORT_FIELDS = new Set(['估算总价（元）', '数量', '估算单价（元）']);
 
-/** 将原始数据导出为文本格式 xlsx（数量/单价/总价列为文本单元格） */
-export async function exportOriginalAsText(
-  rows: SplitRow[],
-  headerOrder: string[],
-  outputFileName: string
-): Promise<Uint8Array> {
-  const wsData: unknown[][] = [headerOrder];
-  for (const row of rows) {
-    const line: unknown[] = headerOrder.map(h => {
-      const val = row[h] ?? '';
-      // 数值字段保持文本字符串，确保不丢失精度
-      if (NUMERIC_EXPORT_FIELDS.has(h) && val !== '' && val != null) {
-        return String(val);
-      }
-      return val;
-    });
-    wsData.push(line);
-  }
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-  // 强制数值字段单元格为文本类型
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-  const numColIndices: number[] = [];
-  for (let c = range.s.c; c <= range.e.c; c++) {
-    const headerCell = ws[XLSX.utils.encode_cell({ r: 0, c })];
-    if (headerCell && NUMERIC_EXPORT_FIELDS.has(String(headerCell.v))) {
-      numColIndices.push(c);
-    }
-  }
-  for (let r = 1; r <= range.e.r; r++) {
-    for (const c of numColIndices) {
-      const ref = XLSX.utils.encode_cell({ r, c });
-      const cell = ws[ref];
-      if (cell) {
-        cell.t = 's'; // 强制文本类型
-        cell.v = String(cell.v);
-        delete cell.w;
-      }
-    }
-  }
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
-  const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
-  await saveToFile(data, outputFileName);
-  return data;
-}
-
 /** 将拆分结果写入 xlsx 并下载，同时返回二进制数据用于项目目录镜像 */
 export async function exportToXlsx(
   rows: SplitRow[],
@@ -157,6 +103,7 @@ export async function exportToXlsx(
     wsData.push(line);
   }
   const ws = XLSX.utils.aoa_to_sheet(wsData);
+  applyExportNumberFormat(ws, headerOrder, wsData.length);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
   const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
@@ -183,12 +130,13 @@ export async function downloadConfigTemplate(fenbiaoNames: string[]): Promise<Ui
 const METHOD_LABELS: Record<SplitMethod, string> = {
   average: '平均分',
   ratio: '比例模板',
-  fixedAmount: '指定金额'
+  fixedAmount: '参考金额'
 };
 const LABEL_TO_METHOD: Record<string, SplitMethod> = {
   '平均分': 'average',
   '比例模板': 'ratio',
-  '指定金额': 'fixedAmount'
+  '指定金额': 'fixedAmount',
+  '参考金额': 'fixedAmount'
 };
 
 /**
@@ -196,7 +144,7 @@ const LABEL_TO_METHOD: Record<string, SplitMethod> = {
  * 列结构: 分标名称 | 分包数量 | 拆分方式 | 包1 | 包2 | ... | 包N
  * - 平均分: 自动计算每包金额
  * - 比例模板: 填百分数
- * - 指定金额: 填金额(元)
+ * - 参考金额: 填参考金额(元)，仅作为拆分权重
  */
 export async function downloadSplitConfigTemplate(
   configs: FenbiaoConfig[],
@@ -238,7 +186,7 @@ export async function downloadSplitConfigTemplate(
         }
       }
     } else if (method === 'fixedAmount') {
-      // 如果已设金额，带出；否则留空
+      // 如果已设参考金额，带出；否则留空
       for (let i = 0; i < maxPkg; i++) {
         if (i < c.packageCount && c.fixedAmounts?.[i] != null) {
           row.push(c.fixedAmounts[i]);
@@ -318,7 +266,7 @@ export function readSplitConfigTemplate(
 
           const method = LABEL_TO_METHOD[methodRaw];
           if (!method) {
-            errors.push(`第${rowNum}行"${name}"：拆分方式无效"${methodRaw}"，只能填写 平均分/比例模板/指定金额`);
+            errors.push(`第${rowNum}行"${name}"：拆分方式无效"${methodRaw}"，只能填写 平均分/比例模板/参考金额`);
             continue;
           }
 
@@ -365,31 +313,13 @@ export function readSplitConfigTemplate(
             }
           }
 
-          // 校验金额总和（指定金额模式）
+          // 指定金额模式下，这里只作为参考金额导入，不再要求总和贴合分标总额。
           if (method === 'fixedAmount') {
             const targetAmount = exactFenbiaoAmountTotals[name] ?? '0';
-            // 四舍五入到与原始数据相同的小数位，消除配置模板中的浮点噪声
-            const targetScale = getDecimalScale(targetAmount);
-            for (let k = 0; k < amountValues.length; k++) {
-              const vScale = getDecimalScale(amountValues[k]);
-              if (vScale > targetScale) {
-                const factor = 10n ** BigInt(vScale - targetScale);
-                const bi = decimalToBigInt(amountValues[k], vScale);
-                const sign = bi < 0n ? -1n : 1n;
-                const abs = bi < 0n ? -bi : bi;
-                const rounded = sign * ((abs + factor / 2n) / factor);
-                amountValues[k] = bigIntToDecimalString(rounded, targetScale);
-              }
-            }
-            try {
-              const adjustedResult = adjustFixedAmountsToTarget(amountValues, targetAmount);
-              amountValues.splice(0, amountValues.length, ...adjustedResult.adjusted);
-              if (adjustedResult.diff != null) {
-                notices.push(`第${rowNum}行“${name}”金额差额${adjustedResult.diff}元，小于${AMOUNT_TOLERANCE}元，已自动补齐到拆分包金额`);
-              }
-            } catch (error) {
-              errors.push(`第${rowNum}行“${name}”：${error instanceof Error ? error.message : String(error)}`);
-              continue;
+            const amountSum = sumDecimalStrings(amountValues);
+            const diff = subtractDecimalStrings(amountSum, targetAmount);
+            if (compareDecimalStrings(diff, '0') !== 0) {
+              notices.push(`第${rowNum}行“${name}”参考金额合计为${amountSum}元，与分标总金额${targetAmount}元差额${diff}元；系统将其仅作为拆分权重使用`);
             }
           }
 

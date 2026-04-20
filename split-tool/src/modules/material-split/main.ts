@@ -1,5 +1,5 @@
 import { readAndValidate, readAndValidateBuffer } from './excel/reader';
-import { exportToXlsx, exportOriginalAsText, downloadConfigTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
+import { exportToXlsx, downloadConfigTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
 import { executeSplit, generatePreviewSummary } from './split/engine';
 import {
   loadTemplates, saveTemplates, addTemplate, updateTemplate,
@@ -28,7 +28,6 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 
 const fileInput = $<HTMLInputElement>('fileInput');
 const btnImport = $('btnImport');
-const btnExportTextOriginal = $('btnExportTextOriginal');
 const importStatus = $('importStatus');
 const importInfo = $('importInfo');
 const importErrors = $('importErrors');
@@ -135,7 +134,6 @@ function renderImportResult(r: ImportResult) {
     `;
     importInfo.classList.remove('hidden');
     importErrors.classList.add('hidden');
-    btnExportTextOriginal.classList.remove('hidden');
     // 初始化分标配置
     state.fenbiaoConfigs = createFenbiaoConfigs(r.fenbiaoNames, state.globalSplitMethod);
     initialConfigs = state.fenbiaoConfigs.map(c => ({ ...c }));
@@ -159,24 +157,12 @@ function renderImportResult(r: ImportResult) {
     }
     importErrors.innerHTML = html;
     importErrors.classList.remove('hidden');
-    btnExportTextOriginal.classList.add('hidden');
     disableModule(sectionPkgConfig);
     disableModule(sectionSplitMethod);
     disableModule(sectionPreview);
     disableModule(sectionExport);
   }
 }
-
-// ============ Export Text Original ============
-btnExportTextOriginal.addEventListener('click', async () => {
-  if (!state.importResult?.success) return;
-  try {
-    const outName = state.importResult.fileName.replace(/\.xlsx$/i, '') + '_文本格式.xlsx';
-    await exportOriginalAsText(state.importResult.rows, state.importResult.headerOrder, outName);
-  } catch (err) {
-    alert(`导出失败: ${err}`);
-  }
-});
 
 // ============ Package Config ============
 function renderPkgConfig() {
@@ -364,7 +350,7 @@ function renderSplitMethod() {
     if (c.packageCount < 1) return;
     const overClass = c.overridden ? 'row-overridden' : '';
     const methodOptions = ['average', 'ratio', 'fixedAmount'].map(m => {
-      const label = m === 'average' ? '平均分' : m === 'ratio' ? '比例模板' : '指定金额';
+      const label = m === 'average' ? '平均分' : m === 'ratio' ? '比例模板' : '参考金额';
       return `<option value="${m}" ${c.splitMethod === m ? 'selected' : ''}>${label}</option>`;
     }).join('');
 
@@ -592,8 +578,8 @@ function openFixedAmountModal(configIdx: number) {
   const config = state.fenbiaoConfigs[configIdx];
   const totalExact = state.importResult?.exactFenbiaoAmountTotals[config.name] ?? '0';
 
-  fixedAmountTitle.textContent = `${config.name} - 指定每包金额`;
-  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别指定金额，总和需等于 ${totalExact} 元`;
+  fixedAmountTitle.textContent = `${config.name} - 设置每包参考金额`;
+  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别设置参考金额，仅作为拆分权重；原分标总额 ${totalExact} 元仅供参考`;
   fixedAmountTarget.textContent = totalExact;
 
   let html = '';
@@ -617,7 +603,7 @@ function updateFixedAmountSum() {
   const diff = subtractDecimalStrings(sum, target);
   fixedAmountSum.textContent = sum;
   fixedAmountDiff.textContent = diff;
-  fixedAmountDiff.style.color = compareDecimalStrings(diff, '0') === 0 ? 'var(--color-success)' : 'var(--color-danger)';
+  fixedAmountDiff.style.color = compareDecimalStrings(diff, '0') === 0 ? 'var(--color-success)' : 'var(--color-warning)';
 }
 
 function closeFixedAmountModal() { fixedAmountModal.classList.add('hidden'); }
@@ -638,8 +624,7 @@ fixedAmountOk.addEventListener('click', () => {
   const sum = sumDecimalStrings(amounts);
   const diff = subtractDecimalStrings(sum, target);
   if (compareDecimalStrings(diff, '0') !== 0) {
-    alert(`金额总和 ${sum} 与目标 ${target} 不一致，差额 ${diff} 元`);
-    return;
+    console.info(`参考金额总和 ${sum} 与分标总额 ${target} 存在差额 ${diff} 元，将仅作为拆分权重使用`);
   }
   state.fenbiaoConfigs[fixedAmountConfigIdx].fixedAmounts = amounts;
   closeFixedAmountModal();
@@ -886,6 +871,8 @@ function renderExportSummary() {
     <p><strong>源文件：</strong>${esc(state.importResult.fileName)}</p>
     <p><strong>原始行数：</strong>${s.originalRows} → <strong>拆分后行数：</strong>${s.splitRows}</p>
     <p><strong>总标段数：</strong>${s.totalFenbiao} | <strong>总分包数：</strong>${s.totalPackages}</p>
+    <p><strong>导出显示规则：</strong>数量固定 3 位小数，金额固定 2 位小数</p>
+    <p><strong>金额校验规则：</strong>每条待拆行在保留 2 位小数后，各包金额合计严格等于拆分前金额</p>
     <p><strong>输出文件名：</strong>${esc(outName)}</p>
   `;
   exportSummaryEl.classList.remove('hidden');
