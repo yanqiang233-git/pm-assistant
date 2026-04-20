@@ -175,6 +175,8 @@ export function executeSplit(
     // ── 拆分待拆行 ──
     const accumulatedPerPkg = new Array<bigint>(n).fill(0n);
     const accumulatedQtyPerPkg = new Array<bigint>(n).fill(0n);
+    // 记录每行最后一包在 result 中的索引，供分标级分散兜底使用
+    const rowLastPkgResultIndices: number[] = [];
 
     for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
       const row = toSplitRows[rowIdx];
@@ -213,6 +215,7 @@ export function executeSplit(
         }
       }
 
+      const rowSplitStart = result.length;
       for (let i = 0; i < n; i++) {
         const newRow: SplitRow = { ...row };
         newRow['分包名称'] = `包${i + 1}`;
@@ -223,6 +226,18 @@ export function executeSplit(
         accumulatedPerPkg[i] += priceShares[i];
         accumulatedQtyPerPkg[i] += qtyShares[i];
       }
+
+      // ── 行级浮点兜底：确保每行 N 包的 Number 求和 = 原始行金额 ──
+      // 保证按「网省采购申请号」分组 SUM 时与原表严格一致
+      const rowSplitRows = result.slice(rowSplitStart, rowSplitStart + n);
+      for (const field of ['估算总价（元）', '数量'] as const) {
+        const origFloat = Number(row[field]);
+        let sumFirst = 0;
+        for (let j = 0; j < n - 1; j++) sumFirst += Number(rowSplitRows[j][field]);
+        const lastVal = origFloat - sumFirst;
+        rowSplitRows[n - 1][field] = normalizeDecimalString(lastVal) ?? String(lastVal);
+      }
+      rowLastPkgResultIndices.push(rowSplitStart + n - 1);
     }
 
     // ── 全局断言：验证拆分后金额总和 ──
@@ -242,8 +257,10 @@ export function executeSplit(
       );
     }
 
-    // ── 浮点层兜底：确保 Number() 求和等于原始浮点和 ──
-    // 当拆分结果在 Excel 中以 Number 求和时，需与原始表求和严格相等
+    // ── 分标级浮点兜底：确保分标所有拆分行的 Number 求和 = 原始分标总和 ──
+    // 行级兜底解决了按行（网省采购申请号）的精度，但运行累加序不同于
+    // 原始表的累加序，可能导致分标级浮点总和微偏；
+    // 将偏差分散到多个原始行的末尾包（每行调整 < 1e-5），保持行级误差不可见。
     const fbSplitRows = result.slice(fbResultStart);
     if (fbSplitRows.length > 0) {
       for (const field of ['估算总价（元）', '数量'] as const) {
@@ -252,9 +269,21 @@ export function executeSplit(
         for (const r of fbSplitRows) splitFloatSum += Number(r[field]);
         if (splitFloatSum !== origFloatSum) {
           const diff = origFloatSum - splitFloatSum;
-          const lastRow = fbSplitRows[fbSplitRows.length - 1];
-          const adjusted = Number(lastRow[field]) + diff;
-          lastRow[field] = normalizeDecimalString(adjusted) ?? String(adjusted);
+          // 分散到不同原始行的末尾包，每行调整量控制在 5e-6 以内
+          const FLOAT_SPREAD_THRESHOLD = 5e-6;
+          const adjustableIndices = rowLastPkgResultIndices.length > 0
+            ? rowLastPkgResultIndices
+            : [fbResultStart + fbSplitRows.length - 1]; // fallback
+          const spreadCount = Math.min(
+            adjustableIndices.length,
+            Math.max(1, Math.ceil(Math.abs(diff) / FLOAT_SPREAD_THRESHOLD))
+          );
+          const perAdj = diff / spreadCount;
+          for (let k = adjustableIndices.length - spreadCount; k < adjustableIndices.length; k++) {
+            const r = result[adjustableIndices[k]];
+            const adjusted = Number(r[field]) + perAdj;
+            r[field] = normalizeDecimalString(adjusted) ?? String(adjusted);
+          }
         }
       }
     }
