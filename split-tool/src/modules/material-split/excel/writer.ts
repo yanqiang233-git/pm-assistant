@@ -1,15 +1,58 @@
 import * as XLSX from 'xlsx';
 import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate } from '../types';
 import {
+  addDecimalStrings,
   bigIntToDecimalString,
   compareDecimalStrings,
   decimalToBigInt,
   getMaxDecimalScale,
+  isDecimalAbsLessThan,
+  isStrictlyDescendingDecimalStrings,
   normalizeDecimalString,
   splitAverageBigInt,
   subtractDecimalStrings,
   sumDecimalStrings
 } from '../split/precision';
+
+const AMOUNT_TOLERANCE = '0.01';
+
+function adjustFixedAmountsToTarget(amountValues: string[], targetAmount: string): { adjusted: string[]; diff: string | null } {
+  const amountSum = sumDecimalStrings(amountValues);
+  const diff = subtractDecimalStrings(targetAmount, amountSum);
+  if (compareDecimalStrings(diff, '0') === 0) {
+    return { adjusted: amountValues, diff: null };
+  }
+  if (!isDecimalAbsLessThan(diff, AMOUNT_TOLERANCE)) {
+    throw new Error(`金额总和${amountSum}元与分标总金额${targetAmount}元差额${subtractDecimalStrings(amountSum, targetAmount)}元，超过允许偏差${AMOUNT_TOLERANCE}元`);
+  }
+
+  const adjusted = [...amountValues];
+  if (compareDecimalStrings(diff, '0') > 0) {
+    adjusted[0] = addDecimalStrings(adjusted[0] ?? '0', diff);
+  } else {
+    let remainToDeduct = diff.slice(1);
+    for (let index = adjusted.length - 1; index >= 0 && compareDecimalStrings(remainToDeduct, '0') > 0; index--) {
+      const current = adjusted[index] ?? '0';
+      if (compareDecimalStrings(current, remainToDeduct) >= 0) {
+        adjusted[index] = subtractDecimalStrings(current, remainToDeduct);
+        remainToDeduct = '0';
+        break;
+      }
+      adjusted[index] = '0';
+      remainToDeduct = subtractDecimalStrings(remainToDeduct, current);
+    }
+
+    if (compareDecimalStrings(remainToDeduct, '0') > 0) {
+      throw new Error(`金额总和${amountSum}元与分标总金额${targetAmount}元差额${subtractDecimalStrings(amountSum, targetAmount)}元无法自动分摊，请调整模板金额`);
+    }
+  }
+
+  if (!isStrictlyDescendingDecimalStrings(adjusted)) {
+    throw new Error('自动补齐尾差后，仍未满足包序号越小金额越大，请调整模板金额');
+  }
+
+  return { adjusted, diff };
+}
 
 function applyMoneyNumberFormat(ws: XLSX.WorkSheet, rowCount: number, maxPkg: number): void {
   const moneyCols = [1, ...Array.from({ length: maxPkg }, (_, index) => 4 + index)];
@@ -188,6 +231,7 @@ export interface SplitConfigImportResult {
   success: boolean;
   rows: SplitConfigRow[];
   errors: string[];
+  notices: string[];
 }
 
 /** 读取拆分方式配置模板并校验 */
@@ -206,6 +250,7 @@ export function readSplitConfigTemplate(
         const ws = wb.Sheets[wb.SheetNames[0]];
         const jsonData = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
         const errors: string[] = [];
+        const notices: string[] = [];
         const rows: SplitConfigRow[] = [];
         const seenNames = new Set<string>();
 
@@ -276,11 +321,15 @@ export function readSplitConfigTemplate(
 
           // 校验金额总和（指定金额模式）
           if (method === 'fixedAmount') {
-            const amountSum = sumDecimalStrings(amountValues);
             const targetAmount = exactFenbiaoAmountTotals[name] ?? '0';
-            if (compareDecimalStrings(amountSum, targetAmount) !== 0) {
-              const diff = subtractDecimalStrings(amountSum, targetAmount);
-              errors.push(`第${rowNum}行“${name}”：金额总和${amountSum}元 ≠ 分标总金额${targetAmount}元，差额${diff}元`);
+            try {
+              const adjustedResult = adjustFixedAmountsToTarget(amountValues, targetAmount);
+              amountValues.splice(0, amountValues.length, ...adjustedResult.adjusted);
+              if (adjustedResult.diff != null) {
+                notices.push(`第${rowNum}行“${name}”金额差额${adjustedResult.diff}元，小于${AMOUNT_TOLERANCE}元，已自动补齐到拆分包金额`);
+              }
+            } catch (error) {
+              errors.push(`第${rowNum}行“${name}”：${error instanceof Error ? error.message : String(error)}`);
               continue;
             }
           }
@@ -289,10 +338,13 @@ export function readSplitConfigTemplate(
           if (method === 'average') {
             const amountSum = sumDecimalStrings(amountValues);
             const targetAmount = exactFenbiaoAmountTotals[name] ?? '0';
-            if (compareDecimalStrings(amountSum, targetAmount) !== 0) {
-              const diff = subtractDecimalStrings(amountSum, targetAmount);
+            const diff = subtractDecimalStrings(amountSum, targetAmount);
+            if (compareDecimalStrings(diff, '0') !== 0 && !isDecimalAbsLessThan(diff, AMOUNT_TOLERANCE)) {
               errors.push(`第${rowNum}行“${name}”：平均分金额总和${amountSum}元 ≠ 分标总金额${targetAmount}元，差额${diff}元`);
               continue;
+            }
+            if (compareDecimalStrings(diff, '0') !== 0 && isDecimalAbsLessThan(diff, AMOUNT_TOLERANCE)) {
+              notices.push(`第${rowNum}行“${name}”平均分金额差额${diff}元，小于${AMOUNT_TOLERANCE}元，允许导入，拆分时按系统金额结果补齐尾差`);
             }
           }
 
@@ -313,12 +365,12 @@ export function readSplitConfigTemplate(
           errors.push(`缺少以下分标：${missing.join('、')}`);
         }
 
-        resolve({ success: errors.length === 0, rows, errors });
+        resolve({ success: errors.length === 0, rows, errors, notices });
       } catch (err) {
-        resolve({ success: false, rows: [], errors: [`文件读取失败: ${err}`] });
+        resolve({ success: false, rows: [], errors: [`文件读取失败: ${err}`], notices: [] });
       }
     };
-    reader.onerror = () => resolve({ success: false, rows: [], errors: ['文件读取失败'] });
+    reader.onerror = () => resolve({ success: false, rows: [], errors: ['文件读取失败'], notices: [] });
     reader.readAsArrayBuffer(file);
   });
 }

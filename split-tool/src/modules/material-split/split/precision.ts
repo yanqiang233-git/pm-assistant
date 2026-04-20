@@ -91,6 +91,27 @@ export function compareDecimalStrings(left: string, right: string): number {
   return leftInt > rightInt ? 1 : -1;
 }
 
+/** 十进制字符串绝对值 */
+export function absDecimalString(value: string): string {
+  const normalized = normalizeDecimalString(value) ?? '0';
+  return normalized.startsWith('-') ? normalized.slice(1) : normalized;
+}
+
+/** 判断十进制字符串的绝对值是否小于阈值 */
+export function isDecimalAbsLessThan(value: string, threshold: string): boolean {
+  return compareDecimalStrings(absDecimalString(value), absDecimalString(threshold)) < 0;
+}
+
+/** 判断金额序列是否满足前包金额严格大于后包金额 */
+export function isStrictlyDescendingDecimalStrings(values: string[]): boolean {
+  for (let index = 0; index < values.length - 1; index++) {
+    if (compareDecimalStrings(values[index], values[index + 1]) <= 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** 十进制字符串加法 */
 export function addDecimalStrings(left: string, right: string): string {
   const leftNormalized = normalizeDecimalString(left) ?? '0';

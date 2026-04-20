@@ -7,6 +7,7 @@ import {
   bigIntToDecimalString,
   decimalToBigInt,
   getMaxDecimalScale,
+  isStrictlyDescendingDecimalStrings,
   normalizeDecimalString,
   splitAverageBigInt,
   splitBigIntByRatio
@@ -121,6 +122,9 @@ export function executeSplit(
       packageTargetAmounts = splitBigIntByRatio(fbTotalAmount, ratios);
       packageTargetQtys = splitBigIntByRatio(fbTotalQty, ratios);
     } else if (method === 'fixedAmount' && config.fixedAmounts) {
+      if (!isStrictlyDescendingDecimalStrings(config.fixedAmounts)) {
+        throw new Error(`分标"${fbName}"的指定金额必须满足包序号越小金额越大`);
+      }
       packageTargetAmounts = config.fixedAmounts.map(value => decimalToBigInt(value, amountScale));
       if (sumBigInt(packageTargetAmounts) !== fbTotalAmount) {
         throw new Error(`分标"${fbName}"的指定金额总和与原始总额不一致`);
