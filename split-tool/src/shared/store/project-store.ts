@@ -10,6 +10,11 @@ function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+async function invokeProjectCommand<T>(command: string, args: object): Promise<T> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<T>(command, args as Record<string, unknown>);
+}
+
 function loadStore(): ProjectListStore {
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -42,22 +47,13 @@ export function extractProjectNumber(dirName: string): string {
 
 /** 在 Tauri 环境下创建项目目录并写入配置文件 */
 async function createProjectDir(project: Project): Promise<void> {
-  const { mkdir, writeTextFile } = await import('@tauri-apps/plugin-fs');
-  // 创建项目文件夹
-  await mkdir(project.directoryPath, { recursive: true });
-  // 写入配置文件
-  const meta: ProjectMeta = { version: 1, project };
-  const configPath = `${project.directoryPath}/${PROJECT_META_FILENAME}`;
-  await writeTextFile(configPath, JSON.stringify(meta, null, 2));
+  await invokeProjectCommand('create_project_dir', { project });
 }
 
 /** 在 Tauri 环境下从项目目录读取配置文件 */
 async function readProjectMeta(dirPath: string): Promise<ProjectMeta | null> {
   try {
-    const { readTextFile } = await import('@tauri-apps/plugin-fs');
-    const configPath = `${dirPath}/${PROJECT_META_FILENAME}`;
-    const raw = await readTextFile(configPath);
-    return JSON.parse(raw) as ProjectMeta;
+    return await invokeProjectCommand<ProjectMeta | null>('read_project_meta', { dirPath });
   } catch {
     return null;
   }
@@ -66,10 +62,7 @@ async function readProjectMeta(dirPath: string): Promise<ProjectMeta | null> {
 /** 更新项目目录下的配置文件 */
 async function updateProjectMeta(project: Project): Promise<void> {
   try {
-    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-    const meta: ProjectMeta = { version: 1, project };
-    const configPath = `${project.directoryPath}/${PROJECT_META_FILENAME}`;
-    await writeTextFile(configPath, JSON.stringify(meta, null, 2));
+    await invokeProjectCommand('update_project_meta', { project });
   } catch (err) {
     console.warn('更新配置文件失败:', err);
   }

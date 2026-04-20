@@ -26,6 +26,11 @@ interface ProjectContext {
   moduleSubDir: string;
 }
 
+interface MirroredFile {
+  fileName: string;
+  data: number[];
+}
+
 /** 模块持久化状态 */
 export interface ModulePersistedState {
   /** 源文件原始名 */
@@ -50,6 +55,16 @@ function stampedName(prefix: string, ext: string): string {
   return `${prefix}_${timestamp()}${ext}`;
 }
 
+function getFileExtension(fileName: string, fallback = '.xlsx'): string {
+  const ext = fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : fallback;
+  return ext || fallback;
+}
+
+async function invokeProjectCommand<T>(command: string, args: object): Promise<T> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<T>(command, args as Record<string, unknown>);
+}
+
 /** 从 URL 参数读取当前模块的项目上下文 */
 export function getProjectContext(): ProjectContext | null {
   const params = new URLSearchParams(window.location.search);
@@ -69,11 +84,7 @@ export async function ensureModuleDirs(): Promise<void> {
   const ctx = getProjectContext();
   if (!ctx) return;
   try {
-    const { mkdir } = await import('@tauri-apps/plugin-fs');
-    const base = getModuleBasePath(ctx);
-    await mkdir(`${base}/${DIR_IMPORT}`, { recursive: true });
-    await mkdir(`${base}/${DIR_TEMPLATE}`, { recursive: true });
-    await mkdir(`${base}/${DIR_EXPORT}`, { recursive: true });
+    await invokeProjectCommand('ensure_module_dirs', ctx);
   } catch (err) {
     console.warn('初始化模块目录失败:', err);
   }
@@ -102,13 +113,12 @@ export async function mirrorImportFile(file: File): Promise<void> {
   const ctx = getProjectContext();
   if (!ctx) return;
   try {
-    const { writeFile, mkdir } = await import('@tauri-apps/plugin-fs');
-    const dirPath = `${getModuleBasePath(ctx)}/${DIR_IMPORT}`;
-    await mkdir(dirPath, { recursive: true });
-    await clearByPrefix(dirPath, PREFIX_SOURCE);
-    const ext = file.name.includes('.') ? file.name.slice(file.name.lastIndexOf('.')) : '.xlsx';
     const buffer = await file.arrayBuffer();
-    await writeFile(`${dirPath}/${stampedName(PREFIX_SOURCE, ext)}`, new Uint8Array(buffer));
+    await invokeProjectCommand('mirror_import_file', {
+      ...ctx,
+      ext: getFileExtension(file.name),
+      data: Array.from(new Uint8Array(buffer))
+    });
   } catch (err) {
     console.warn(`镜像导入文件失败:`, err);
   }
@@ -119,12 +129,12 @@ export async function mirrorTemplate(data: Uint8Array, type: 'pkg' | 'split'): P
   const ctx = getProjectContext();
   if (!ctx) return;
   try {
-    const { writeFile, mkdir } = await import('@tauri-apps/plugin-fs');
-    const dirPath = `${getModuleBasePath(ctx)}/${DIR_TEMPLATE}`;
-    await mkdir(dirPath, { recursive: true });
-    const prefix = type === 'pkg' ? PREFIX_PKG_TPL : PREFIX_SPLIT_TPL;
-    await clearByPrefix(dirPath, prefix);
-    await writeFile(`${dirPath}/${stampedName(prefix, '.xlsx')}`, data);
+    await invokeProjectCommand('mirror_template_file', {
+      ...ctx,
+      templateType: type,
+      ext: '.xlsx',
+      data: Array.from(data)
+    });
   } catch (err) {
     console.warn(`镜像模板失败:`, err);
   }
@@ -135,14 +145,13 @@ export async function mirrorUploadedTemplate(file: File, type: 'pkg' | 'split'):
   const ctx = getProjectContext();
   if (!ctx) return;
   try {
-    const { writeFile, mkdir } = await import('@tauri-apps/plugin-fs');
-    const dirPath = `${getModuleBasePath(ctx)}/${DIR_TEMPLATE}`;
-    await mkdir(dirPath, { recursive: true });
-    const prefix = type === 'pkg' ? PREFIX_PKG_TPL : PREFIX_SPLIT_TPL;
-    await clearByPrefix(dirPath, prefix);
-    const ext = file.name.includes('.') ? file.name.slice(file.name.lastIndexOf('.')) : '.xlsx';
     const buffer = await file.arrayBuffer();
-    await writeFile(`${dirPath}/${stampedName(prefix, ext)}`, new Uint8Array(buffer));
+    await invokeProjectCommand('mirror_template_file', {
+      ...ctx,
+      templateType: type,
+      ext: getFileExtension(file.name),
+      data: Array.from(new Uint8Array(buffer))
+    });
   } catch (err) {
     console.warn(`镜像上传模板失败:`, err);
   }
@@ -153,11 +162,10 @@ export async function mirrorExportResult(data: Uint8Array): Promise<void> {
   const ctx = getProjectContext();
   if (!ctx) return;
   try {
-    const { writeFile, mkdir } = await import('@tauri-apps/plugin-fs');
-    const dirPath = `${getModuleBasePath(ctx)}/${DIR_EXPORT}`;
-    await mkdir(dirPath, { recursive: true });
-    await clearByPrefix(dirPath, PREFIX_RESULT);
-    await writeFile(`${dirPath}/${stampedName(PREFIX_RESULT, '.xlsx')}`, data);
+    await invokeProjectCommand('mirror_export_result', {
+      ...ctx,
+      data: Array.from(data)
+    });
   } catch (err) {
     console.warn(`镜像导出结果失败:`, err);
   }
@@ -170,9 +178,10 @@ export async function saveModuleState(stateData: ModulePersistedState): Promise<
   const ctx = getProjectContext();
   if (!ctx) return;
   try {
-    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-    const filePath = `${getModuleBasePath(ctx)}/${MODULE_STATE_FILE}`;
-    await writeTextFile(filePath, JSON.stringify(stateData, null, 2));
+    await invokeProjectCommand('save_module_state', {
+      ...ctx,
+      stateJson: JSON.stringify(stateData, null, 2)
+    });
   } catch (err) {
     console.warn('保存模块状态失败:', err);
   }
@@ -183,10 +192,8 @@ export async function loadModuleState(): Promise<ModulePersistedState | null> {
   const ctx = getProjectContext();
   if (!ctx) return null;
   try {
-    const { readTextFile } = await import('@tauri-apps/plugin-fs');
-    const filePath = `${getModuleBasePath(ctx)}/${MODULE_STATE_FILE}`;
-    const raw = await readTextFile(filePath);
-    return JSON.parse(raw) as ModulePersistedState;
+    const raw = await invokeProjectCommand<string | null>('load_module_state', ctx);
+    return raw ? JSON.parse(raw) as ModulePersistedState : null;
   } catch {
     return null;
   }
@@ -199,18 +206,9 @@ export async function loadLatestImportFile(): Promise<{ fileName: string; data: 
   const ctx = getProjectContext();
   if (!ctx) return null;
   try {
-    const { readDir, readFile } = await import('@tauri-apps/plugin-fs');
-    const dirPath = `${getModuleBasePath(ctx)}/${DIR_IMPORT}`;
-    const entries = await readDir(dirPath);
-    // 找到最新的源文件（按名称排序，时间戳在后面的更新）
-    const sourceFiles = entries
-      .filter(e => e.name?.startsWith(PREFIX_SOURCE))
-      .sort((a, b) => (b.name ?? '').localeCompare(a.name ?? ''));
-    if (sourceFiles.length === 0) return null;
-    const latest = sourceFiles[0];
-    const filePath = `${dirPath}/${latest.name}`;
-    const data = await readFile(filePath);
-    return { fileName: latest.name!, data: new Uint8Array(data) };
+    const latest = await invokeProjectCommand<MirroredFile | null>('load_latest_import_file', ctx);
+    if (!latest) return null;
+    return { fileName: latest.fileName, data: new Uint8Array(latest.data) };
   } catch {
     return null;
   }
