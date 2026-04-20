@@ -5,6 +5,7 @@ import {
   bigIntToDecimalString,
   compareDecimalStrings,
   decimalToBigInt,
+  getDecimalScale,
   getMaxDecimalScale,
   isDecimalAbsLessThan,
   normalizeDecimalString,
@@ -87,6 +88,9 @@ async function saveToFile(data: Uint8Array, filename: string): Promise<void> {
   }, 100);
 }
 
+/** 数值字段集合：导出时转为 Number 便于 Excel 直接 SUM() */
+const NUMERIC_EXPORT_FIELDS = new Set(['估算总价（元）', '数量', '估算单价（元）']);
+
 /** 将拆分结果写入 xlsx 并下载，同时返回二进制数据用于项目目录镜像 */
 export async function exportToXlsx(
   rows: SplitRow[],
@@ -95,7 +99,15 @@ export async function exportToXlsx(
 ): Promise<Uint8Array> {
   const wsData: unknown[][] = [headerOrder];
   for (const row of rows) {
-    const line: unknown[] = headerOrder.map(h => row[h] ?? '');
+    const line: unknown[] = headerOrder.map(h => {
+      const val = row[h] ?? '';
+      // 数值字段转为 Number 输出，使 Excel 单元格为数值类型
+      if (NUMERIC_EXPORT_FIELDS.has(h) && val !== '' && val != null) {
+        const num = Number(val);
+        if (!isNaN(num)) return num;
+      }
+      return val;
+    });
     wsData.push(line);
   }
   const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -310,6 +322,19 @@ export function readSplitConfigTemplate(
           // 校验金额总和（指定金额模式）
           if (method === 'fixedAmount') {
             const targetAmount = exactFenbiaoAmountTotals[name] ?? '0';
+            // 四舍五入到与原始数据相同的小数位，消除配置模板中的浮点噪声
+            const targetScale = getDecimalScale(targetAmount);
+            for (let k = 0; k < amountValues.length; k++) {
+              const vScale = getDecimalScale(amountValues[k]);
+              if (vScale > targetScale) {
+                const factor = 10n ** BigInt(vScale - targetScale);
+                const bi = decimalToBigInt(amountValues[k], vScale);
+                const sign = bi < 0n ? -1n : 1n;
+                const abs = bi < 0n ? -bi : bi;
+                const rounded = sign * ((abs + factor / 2n) / factor);
+                amountValues[k] = bigIntToDecimalString(rounded, targetScale);
+              }
+            }
             try {
               const adjustedResult = adjustFixedAmountsToTarget(amountValues, targetAmount);
               amountValues.splice(0, amountValues.length, ...adjustedResult.adjusted);

@@ -87,7 +87,8 @@ export function executeSplit(
     // ── 输出预分配行（自动补分包编号）──
     const amountDecimals = fbRows.map(row => getNormalizedDecimal(row, '估算总价（元）'));
     const qtyDecimals = fbRows.map(row => getNormalizedDecimal(row, '数量'));
-    const amountScale = getMaxDecimalScale([...amountDecimals, ...(config.fixedAmounts ?? [])]);
+    // amountScale 仅由数据行决定，不受配置模板浮点噪声膨胀
+    const amountScale = getMaxDecimalScale(amountDecimals);
     const qtyScale = getMaxDecimalScale(qtyDecimals);
 
     const preAllocAmountPerPkg = new Array<bigint>(n).fill(0n);
@@ -124,10 +125,16 @@ export function executeSplit(
       packageTargetAmounts = splitBigIntByRatio(fbTotalAmount, ratios);
       packageTargetQtys = splitBigIntByRatio(fbTotalQty, ratios);
     } else if (method === 'fixedAmount' && config.fixedAmounts) {
-      packageTargetAmounts = config.fixedAmounts.map(value => decimalToBigInt(value, amountScale));
-      if (sumBigInt(packageTargetAmounts) !== fbTotalAmount) {
-        throw new Error(`分标"${fbName}"的指定金额总和与原始总额不一致`);
-      }
+      // 将指定金额四舍五入到 amountScale，消除配置模板的浮点噪声
+      packageTargetAmounts = config.fixedAmounts.map(v => {
+        const vScale = getMaxDecimalScale([v]);
+        if (vScale <= amountScale) return decimalToBigInt(v, amountScale);
+        const factor = 10n ** BigInt(vScale - amountScale);
+        return (decimalToBigInt(v, vScale) + factor / 2n) / factor;
+      });
+      // 最后一包用减法兜底，确保总和严格相等
+      const sumOfRest = sumBigInt(packageTargetAmounts.slice(0, -1));
+      packageTargetAmounts[packageTargetAmounts.length - 1] = fbTotalAmount - sumOfRest;
       packageTargetQtys = splitBigIntByRatio(fbTotalQty, packageTargetAmounts);
     } else {
       packageTargetAmounts = splitAverageBigInt(fbTotalAmount, n);
@@ -233,6 +240,23 @@ export function executeSplit(
       throw new Error(
         `内部错误：分标"${fbName}"拆分后数量总和(${bigIntToDecimalString(outputQtyTotal, qtyScale)})≠原始总和(${bigIntToDecimalString(fbTotalQty, qtyScale)})`
       );
+    }
+
+    // ── 浮点层兜底：确保 Number() 求和等于原始浮点和 ──
+    // 当拆分结果在 Excel 中以 Number 求和时，需与原始表求和严格相等
+    const fbSplitRows = result.slice(fbResultStart);
+    if (fbSplitRows.length > 0) {
+      for (const field of ['估算总价（元）', '数量'] as const) {
+        const origFloatSum = fbRows.reduce((s, r) => s + Number(r[field]), 0);
+        let splitFloatSum = 0;
+        for (const r of fbSplitRows) splitFloatSum += Number(r[field]);
+        if (splitFloatSum !== origFloatSum) {
+          const diff = origFloatSum - splitFloatSum;
+          const lastRow = fbSplitRows[fbSplitRows.length - 1];
+          const adjusted = Number(lastRow[field]) + diff;
+          lastRow[field] = normalizeDecimalString(adjusted) ?? String(adjusted);
+        }
+      }
     }
 
   }
