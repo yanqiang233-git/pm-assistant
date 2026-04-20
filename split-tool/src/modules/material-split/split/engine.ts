@@ -9,7 +9,8 @@ import {
   getMaxDecimalScale,
   normalizeDecimalString,
   splitAverageBigInt,
-  splitBigIntByRatio
+  splitBigIntByRatio,
+  sumDecimalStrings
 } from './precision';
 
 function getNormalizedDecimal(row: ExcelRow, field: string): string {
@@ -57,6 +58,8 @@ export function executeSplit(
     }
 
     const n = config.packageCount;
+
+    const fbResultStart = result.length;
 
     // ── 分离预分配行与待拆行 ──
     const preAllocRows: ExcelRow[] = [];
@@ -207,8 +210,8 @@ export function executeSplit(
         const newRow: SplitRow = { ...row };
         newRow['分包名称'] = `包${i + 1}`;
         newRow['分包编号'] = `JS${(i + 1) * 100}`;
-        newRow['估算总价（元）'] = bigIntToDecimalString(priceShares[i], amountScale);
-        newRow['数量'] = bigIntToDecimalString(qtyShares[i], qtyScale);
+        newRow['估算总价（元）'] = Number(bigIntToDecimalString(priceShares[i], amountScale));
+        newRow['数量'] = Number(bigIntToDecimalString(qtyShares[i], qtyScale));
         result.push(newRow);
         accumulatedPerPkg[i] += priceShares[i];
         accumulatedQtyPerPkg[i] += qtyShares[i];
@@ -231,6 +234,23 @@ export function executeSplit(
         `内部错误：分标"${fbName}"拆分后数量总和(${bigIntToDecimalString(outputQtyTotal, qtyScale)})≠原始总和(${bigIntToDecimalString(fbTotalQty, qtyScale)})`
       );
     }
+
+    // ── 浮点层兜底：确保 Number 求和与原始行完全一致 ──
+    const fbOutputRows = result.slice(fbResultStart);
+    const origAmtFloat = fbRows.reduce((s, r) => s + Number(r['估算总价（元）'] ?? 0), 0);
+    const origQtyFloat = fbRows.reduce((s, r) => s + Number(r['数量'] ?? 0), 0);
+    const outAmtFloat = fbOutputRows.reduce((s, r) => s + Number(r['估算总价（元）'] ?? 0), 0);
+    const outQtyFloat = fbOutputRows.reduce((s, r) => s + Number(r['数量'] ?? 0), 0);
+    const amtDiff = origAmtFloat - outAmtFloat;
+    const qtyDiff = origQtyFloat - outQtyFloat;
+    if (amtDiff !== 0 && fbOutputRows.length > 0) {
+      const last = fbOutputRows[fbOutputRows.length - 1];
+      last['估算总价（元）'] = Number(last['估算总价（元）']) + amtDiff;
+    }
+    if (qtyDiff !== 0 && fbOutputRows.length > 0) {
+      const last = fbOutputRows[fbOutputRows.length - 1];
+      last['数量'] = Number(last['数量']) + qtyDiff;
+    }
   }
 
   return result;
@@ -252,12 +272,14 @@ export function generatePreviewSummary(
     const totalAmount = origRows.reduce(
       (s, r) => s + Number(r['估算总价（元）'] ?? 0), 0
     );
+    const amounts = origRows.map(r => normalizeDecimalString(r['估算总价（元）']) ?? '0');
+    const exactTotal = sumDecimalStrings(amounts);
     return {
       name: c.name,
       originalRows: origRows.length,
       packageCount: c.packageCount,
       splitRows: splitRowsForFB.length,
-      totalAmount: Math.round(totalAmount * 10000) / 10000
+      totalAmount: Number(exactTotal)
     };
   });
 
