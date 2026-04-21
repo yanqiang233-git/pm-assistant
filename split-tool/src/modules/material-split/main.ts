@@ -10,6 +10,7 @@ import { parseSingleColumnPaste, parseTwoColumnPaste } from './config/paste';
 import { createInitialState, createFenbiaoConfigs, updateGlobalMethod, saveStateSnapshot } from './store/state';
 import {
   compareDecimalStrings,
+  getDecimalScale,
   normalizeDecimalString,
   subtractDecimalStrings,
   sumDecimalStrings,
@@ -22,8 +23,18 @@ import {
 } from '../../shared/store/project-files';
 import type {
   AppState, FenbiaoConfig, SplitMethod, RatioTemplate,
+  SplitScope,
   ImportResult, PasteResult, ExcelRow
 } from './types';
+
+const SPLIT_SCOPE_LABELS: Record<SplitScope, string> = {
+  rounded: '取整拆分',
+  decimal: '小数拆分'
+};
+
+function getSplitScopeLabel(scope: SplitScope): string {
+  return SPLIT_SCOPE_LABELS[scope];
+}
 
 // ============ State ============
 let state: AppState = createInitialState();
@@ -141,7 +152,7 @@ function renderImportResult(r: ImportResult) {
     importInfo.classList.remove('hidden');
     importErrors.classList.add('hidden');
     // 初始化分标配置
-    state.fenbiaoConfigs = createFenbiaoConfigs(r.fenbiaoNames, state.globalSplitMethod);
+    state.fenbiaoConfigs = createFenbiaoConfigs(r.fenbiaoNames, state.globalSplitMethod, r.exactFenbiaoQtyTotals);
     initialConfigs = state.fenbiaoConfigs.map(c => ({ ...c }));
     enableModule(sectionPkgConfig);
     enableModule(sectionSplitMethod);
@@ -177,10 +188,14 @@ function renderPkgConfig() {
   configs.forEach((c, i) => {
     const errClass = c.packageCount < 1 ? 'row-error' : '';
     const statusText = c.packageCount >= 1 ? '✓' : '未填';
+    const splitScopeOptions = Object.entries(SPLIT_SCOPE_LABELS).map(([value, label]) =>
+      `<option value="${value}" ${c.splitScope === value ? 'selected' : ''}>${label}</option>`
+    ).join('');
     html += `<tr class="${errClass}">
       <td class="col-idx" style="text-align:center">${i + 1}</td>
       <td class="col-name">${esc(c.name)}</td>
       <td class="col-count"><input type="number" min="1" value="${c.packageCount || ''}" data-idx="${i}" class="pkg-count-input" /></td>
+      <td class="col-method"><select data-idx="${i}" class="pkg-scope-select">${splitScopeOptions}</select></td>
       <td class="col-status">${statusText}</td>
     </tr>`;
   });
@@ -202,6 +217,16 @@ function renderPkgConfig() {
         el.closest('tr')!.querySelector('.col-status')!.textContent = '未填';
       }
       updatePkgSummary();
+      renderSplitMethod();
+      clearPreview();
+      persistModuleState();
+    });
+  });
+  pkgTableBody.querySelectorAll('.pkg-scope-select').forEach(select => {
+    select.addEventListener('change', (e) => {
+      const el = e.target as HTMLSelectElement;
+      const idx = parseInt(el.dataset.idx!);
+      state.fenbiaoConfigs[idx].splitScope = el.value as SplitScope;
       renderSplitMethod();
       clearPreview();
       persistModuleState();
@@ -298,7 +323,7 @@ function showPasteResult(r: PasteResult) {
 // ============ Template download/import ============
 btnDownloadTpl.addEventListener('click', async () => {
   if (!state.importResult) return;
-  const buf = await downloadConfigTemplate(state.importResult.fenbiaoNames);
+  const buf = await downloadConfigTemplate(state.fenbiaoConfigs);
   mirrorTemplate(buf, 'pkg');
 });
 
@@ -312,7 +337,28 @@ tplFileInput.addEventListener('change', async () => {
       data.map(d => `${d.name}\t${d.count ?? ''}`).join('\n'),
       state.fenbiaoConfigs
     );
-    state.fenbiaoConfigs = parsed.configs;
+    const scopeMap = new Map(data.map(item => [item.name, item.splitScope]));
+    state.fenbiaoConfigs = parsed.configs.map(config => {
+      const splitScope = scopeMap.get(config.name);
+      return splitScope ? { ...config, splitScope } : config;
+    });
+    const roundedErrors = collectRoundedScopeErrors(state.importResult!, state.fenbiaoConfigs);
+    if (roundedErrors.length > 0) {
+      showPasteResult({
+        totalParsed: data.length,
+        successCount: 0,
+        failCount: roundedErrors.length,
+        unmatchedNames: [],
+        invalidValues: roundedErrors.slice(0, 20).map((message, index) => ({ line: index + 1, value: message }))
+      });
+      state.fenbiaoConfigs = initialConfigs.map(c => ({ ...c }));
+      renderPkgConfig();
+      updatePkgSummary();
+      renderSplitMethod();
+      clearPreview();
+      tplFileInput.value = '';
+      return;
+    }
     showPasteResult(parsed.result);
     renderPkgConfig();
     updatePkgSummary();
@@ -385,6 +431,7 @@ function renderSplitMethod() {
       <td style="text-align:center">${i + 1}</td>
       <td>${esc(c.name)}</td>
       <td style="text-align:center">${c.packageCount}</td>
+      <td style="text-align:center">${getSplitScopeLabel(c.splitScope)}</td>
       <td><select class="method-select" data-idx="${i}">${methodOptions}</select></td>
       <td>${tplInfo}</td>
       <td style="text-align:center">${c.overridden ? '⚡' : ''}</td>
@@ -510,6 +557,7 @@ splitTplFileInput.addEventListener('change', async () => {
   for (const r of result.rows) {
     const idx = state.fenbiaoConfigs.findIndex(c => c.name === r.name);
     if (idx < 0) continue;
+    state.fenbiaoConfigs[idx].splitScope = r.splitScope;
     state.fenbiaoConfigs[idx].splitMethod = r.method;
     state.fenbiaoConfigs[idx].overridden = true;
     state.fenbiaoConfigs[idx].templateId = undefined;
@@ -585,7 +633,7 @@ function openFixedAmountModal(configIdx: number) {
   const totalExact = state.importResult?.exactFenbiaoAmountTotals[config.name] ?? '0';
 
   fixedAmountTitle.textContent = `${config.name} - 设置每包参考金额`;
-  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别设置参考金额，仅作为拆分权重；原分标总额 ${totalExact} 元仅供参考`;
+  fixedAmountHint.textContent = `请为 ${config.packageCount} 个包分别设置参考金额；取整拆分时系统会折算为目标包金额并尽量贴近，原分标总额 ${totalExact} 元仅供参考`;
   fixedAmountTarget.textContent = totalExact;
 
   let html = '';
@@ -630,7 +678,7 @@ fixedAmountOk.addEventListener('click', () => {
   const sum = sumDecimalStrings(amounts);
   const diff = subtractDecimalStrings(sum, target);
   if (compareDecimalStrings(diff, '0') !== 0) {
-    console.info(`参考金额总和 ${sum} 与分标总额 ${target} 存在差额 ${diff} 元，将仅作为拆分权重使用`);
+    console.info(`参考金额总和 ${sum} 与分标总额 ${target} 存在差额 ${diff} 元，系统将按比例折算为目标包金额后尽量贴近`);
   }
   state.fenbiaoConfigs[fixedAmountConfigIdx].fixedAmounts = amounts;
   closeFixedAmountModal();
@@ -799,6 +847,12 @@ btnExecuteSplit.addEventListener('click', () => {
     return;
   }
 
+  const roundedErrors = collectRoundedScopeErrors(state.importResult!, state.fenbiaoConfigs);
+  if (roundedErrors.length > 0) {
+    alert(`以下分标已配置为取整拆分，但数量存在小数：\n${roundedErrors.slice(0, 20).join('\n')}`);
+    return;
+  }
+
   try {
     const templates = loadTemplates();
     state.splitResult = executeSplit(state.importResult!.rows, state.fenbiaoConfigs, templates);
@@ -857,7 +911,9 @@ function renderPreview() {
 function formatPreviewCellValue(row: ExcelRow, field: string): string {
   const value = row[field];
   if (field === '数量') {
-    return toFixedDecimalString(value, 3) ?? String(value ?? '');
+    const fenbiaoName = String(row['分标名称'] ?? '').trim();
+    const splitScope = state.fenbiaoConfigs.find(config => config.name === fenbiaoName)?.splitScope ?? 'decimal';
+    return toFixedDecimalString(value, splitScope === 'rounded' ? 0 : 3) ?? String(value ?? '');
   }
   if (field === '估算单价（元）' || field === '估算总价（元）') {
     return toFixedDecimalString(value, 2) ?? String(value ?? '');
@@ -888,8 +944,9 @@ function renderExportSummary() {
     <p><strong>源文件：</strong>${esc(state.importResult.fileName)}</p>
     <p><strong>原始行数：</strong>${s.originalRows} → <strong>拆分后行数：</strong>${s.splitRows}</p>
     <p><strong>总标段数：</strong>${s.totalFenbiao} | <strong>总分包数：</strong>${s.totalPackages}</p>
-    <p><strong>导出显示规则：</strong>数量固定 3 位小数，金额固定 2 位小数</p>
+    <p><strong>导出显示规则：</strong>取整拆分数量显示整数，小数拆分数量显示 3 位小数，金额固定 2 位小数</p>
     <p><strong>金额校验规则：</strong>每条待拆行在保留 2 位小数后，各包金额合计严格等于拆分前金额</p>
+    <p><strong>参考金额规则：</strong>取整拆分 + 参考金额时，系统会按参考金额折算目标包金额，并尽量降低各包目标偏差</p>
     <p><strong>输出文件名：</strong>${esc(outName)}</p>
   `;
   exportSummaryEl.classList.remove('hidden');
@@ -904,7 +961,7 @@ btnExport.addEventListener('click', async () => {
   }
   try {
     const outName = state.importResult.fileName.replace(/\.xlsx$/i, '') + '_拆分结果.xlsx';
-    const buf = await exportToXlsx(state.splitResult, state.importResult.headerOrder, outName);
+    const buf = await exportToXlsx(state.splitResult, state.importResult.headerOrder, outName, state.fenbiaoConfigs);
     mirrorExportResult(buf);
     exportStatus.textContent = '已导出';
     exportStatus.className = 'status-badge success';
@@ -934,6 +991,32 @@ function persistModuleState(): void {
   });
 }
 
+function collectRoundedScopeErrors(importResult: ImportResult, configs: FenbiaoConfig[]): string[] {
+  const configMap = new Map(configs.map(config => [config.name, config]));
+  const errors: string[] = [];
+
+  for (const config of configs) {
+    if (config.splitScope !== 'rounded') continue;
+    const totalQty = importResult.exactFenbiaoQtyTotals[config.name] ?? '0';
+    if (getDecimalScale(totalQty) > 0) {
+      errors.push(`${config.name}：分标总数量 ${totalQty}`);
+    }
+  }
+
+  importResult.rows.forEach((row, index) => {
+    const fenbiaoName = String(row['分标名称'] ?? '').trim();
+    const config = configMap.get(fenbiaoName);
+    if (!config || config.splitScope !== 'rounded') return;
+    const qty = normalizeDecimalString(row['数量']) ?? '';
+    if (!qty || getDecimalScale(qty) > 0) {
+      const pkgName = String(row['分包名称'] ?? '').trim() || '(待拆分)';
+      errors.push(`${fenbiaoName}：第${index + 2}行数量 ${String(row['数量'] ?? '')}，分包名称 ${pkgName}`);
+    }
+  });
+
+  return [...new Set(errors)];
+}
+
 // ============ Init ============
 async function initModule(): Promise<void> {
   await ensureModuleDirs();
@@ -961,7 +1044,10 @@ async function initModule(): Promise<void> {
       (n, i) => savedConfigs[i]?.name === n
     );
     if (namesMatch) {
-      state.fenbiaoConfigs = savedConfigs;
+      state.fenbiaoConfigs = savedConfigs.map(config => ({
+        ...config,
+        splitScope: config.splitScope ?? (getDecimalScale(result.exactFenbiaoQtyTotals[config.name] ?? '0') === 0 ? 'rounded' : 'decimal')
+      }));
       state.globalSplitMethod = saved.globalSplitMethod as SplitMethod;
       globalMethodSelect.value = state.globalSplitMethod;
     }

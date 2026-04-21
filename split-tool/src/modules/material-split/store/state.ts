@@ -1,4 +1,5 @@
 import { AppState, FenbiaoConfig, SplitMethod } from '../types';
+import { isIntegerDecimalString } from '../split/precision';
 
 const STATE_KEY = 'split_tool_app_state';
 
@@ -38,11 +39,13 @@ export function restoreStateSnapshot(): Partial<AppState> | null {
 /** 根据分标名称列表创建初始配置 */
 export function createFenbiaoConfigs(
   names: string[],
-  globalMethod: SplitMethod
+  globalMethod: SplitMethod,
+  exactFenbiaoQtyTotals: Record<string, string> = {}
 ): FenbiaoConfig[] {
   return names.map(name => ({
     name,
     packageCount: 0,
+    splitScope: isIntegerDecimalString(exactFenbiaoQtyTotals[name] ?? '0') ? 'rounded' : 'decimal',
     splitMethod: globalMethod,
     overridden: false
   }));

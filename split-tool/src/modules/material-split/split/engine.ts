@@ -6,6 +6,7 @@ import {
   bigIntToDecimalString,
   decimalToBigInt,
   getMaxDecimalScale,
+  getDecimalScale,
   normalizeDecimalString,
   splitAverageBigInt,
   splitBigIntByRatio,
@@ -15,6 +16,7 @@ import {
 /** 输出精度：金额保留 2 位小数，数量保留 3 位小数 */
 const AMOUNT_OUTPUT_SCALE = 2;
 const QTY_OUTPUT_SCALE = 3;
+const ROUNDED_QTY_OUTPUT_SCALE = 0;
 
 function getNormalizedDecimal(row: ExcelRow, field: string): string {
   return normalizeDecimalString(row[field]) ?? '0';
@@ -78,6 +80,30 @@ function assertRoundedSum(
       `${contextLabel}${fieldLabel}在保留${scale}位小数后合计不等于原值：拆分合计${bigIntToDecimalString(sum, scale)}，原值${bigIntToDecimalString(target, scale)}`
     );
   }
+}
+
+function buildFixedAmountTargets(total: bigint, fixedAmounts: string[]): bigint[] {
+  const weightScale = getMaxDecimalScale(fixedAmounts);
+  const weights = fixedAmounts.map(value => decimalToBigInt(value, weightScale));
+  if (sumBigInt(weights) === 0n) {
+    throw new Error('参考金额不能全为 0');
+  }
+  return splitBigIntByRatio(total, weights);
+}
+
+function buildDynamicFixedAmountRowTargets(
+  rowTotal: bigint,
+  packageTargets: bigint[],
+  allocated: bigint[],
+  isLastRow: boolean
+): bigint[] {
+  const remaining = packageTargets.map((target, index) => target - allocated[index]);
+  if (isLastRow) {
+    return remaining;
+  }
+  const positiveRemaining = remaining.map(value => value > 0n ? value : 0n);
+  const weights = sumBigInt(positiveRemaining) > 0n ? positiveRemaining : packageTargets;
+  return splitBigIntByRatio(rowTotal, weights);
 }
 
 /**
@@ -147,7 +173,8 @@ export function executeSplit(
     const qtyDecimals = fbRows.map(row => getNormalizedDecimal(row, '数量'));
     // 内部运算精度：取数据实际精度与输出精度的较大值
     const amountScale = Math.max(getMaxDecimalScale(amountDecimals), AMOUNT_OUTPUT_SCALE);
-    const qtyScale = Math.max(getMaxDecimalScale(qtyDecimals), QTY_OUTPUT_SCALE);
+    const qtyOutputScale = config.splitScope === 'rounded' ? ROUNDED_QTY_OUTPUT_SCALE : QTY_OUTPUT_SCALE;
+    const qtyScale = Math.max(getMaxDecimalScale(qtyDecimals), qtyOutputScale);
 
     // ── 输出预分配行（自动补分包编号）──
     for (const row of preAllocRows) {
@@ -161,10 +188,6 @@ export function executeSplit(
     // 若该分标无待拆行，跳过后续拆分逻辑
     if (toSplitRows.length === 0) continue;
 
-    // ── 计算分标精确总量 ──
-    const fbTotalAmount = sumBigInt(amountDecimals.map(value => decimalToBigInt(value, amountScale)));
-    const fbTotalQty = sumBigInt(qtyDecimals.map(value => decimalToBigInt(value, qtyScale)));
-
     const method: SplitMethod = config.splitMethod;
     // 待拆行按“逐行独立拆分”处理：
     // 预分配行仅原样保留并计入总量，不再占用后续待拆行的包级预算。
@@ -174,9 +197,25 @@ export function executeSplit(
     const rowQtysInt = toSplitRows.map(
       row => decimalToBigInt(getNormalizedDecimal(row, '数量'), qtyScale)
     );
+    const fixedAmountRoundedTargets = method === 'fixedAmount' && config.fixedAmounts && config.splitScope === 'rounded'
+      ? buildFixedAmountTargets(
+          rowAmountsInt.reduce(
+            (sum, value) => sum + roundBigIntToScale(value, amountScale, AMOUNT_OUTPUT_SCALE),
+            0n
+          ),
+          config.fixedAmounts
+        )
+      : null;
+    const fixedAmountRoundedAllocated = fixedAmountRoundedTargets
+      ? Array.from({ length: n }, () => 0n)
+      : null;
 
     for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
       const row = toSplitRows[rowIdx];
+      const isLastRow = rowIdx === toSplitRows.length - 1;
+      if (config.splitScope === 'rounded' && getDecimalScale(getNormalizedDecimal(row, '数量')) > 0) {
+        throw new Error(`分标"${fbName}"存在小数数量，不能按取整拆分执行`);
+      }
       const rowAmountInt = rowAmountsInt[rowIdx];
       const rowQtyInt = rowQtysInt[rowIdx];
 
@@ -206,23 +245,50 @@ export function executeSplit(
 
       // 行级是唯一硬约束：每行 round 后必须严格回到原行金额/数量。
       const amtTarget = roundBigIntToScale(rowAmountInt, amountScale, AMOUNT_OUTPUT_SCALE);
-      const qtyTarget = roundBigIntToScale(rowQtyInt, qtyScale, QTY_OUTPUT_SCALE);
+      const qtyTarget = roundBigIntToScale(rowQtyInt, qtyScale, qtyOutputScale);
 
-      const roundedAmts = roundAndReconcile(priceShares, amountScale, AMOUNT_OUTPUT_SCALE, amtTarget);
-      const roundedQtys = roundAndReconcile(qtyShares, qtyScale, QTY_OUTPUT_SCALE, qtyTarget);
+      const useFixedAmountRoundedOptimization = Boolean(fixedAmountRoundedTargets && fixedAmountRoundedAllocated);
+      const roundedAmts = useFixedAmountRoundedOptimization
+        ? buildDynamicFixedAmountRowTargets(
+            amtTarget,
+            fixedAmountRoundedTargets!,
+            fixedAmountRoundedAllocated!,
+            isLastRow
+          )
+        : roundAndReconcile(priceShares, amountScale, AMOUNT_OUTPUT_SCALE, amtTarget);
+      const qtyWeightBasis = useFixedAmountRoundedOptimization
+        ? roundedAmts.map(value => value > 0n ? value : 0n)
+        : null;
+      const optimizedQtyShares = useFixedAmountRoundedOptimization
+        ? splitBigIntByRatio(
+            rowQtyInt,
+            sumBigInt(qtyWeightBasis!) > 0n ? qtyWeightBasis! : fixedAmountRoundedTargets!
+          )
+        : null;
+      const roundedQtys = useFixedAmountRoundedOptimization
+        ? roundAndReconcile(optimizedQtyShares!, qtyScale, qtyOutputScale, qtyTarget)
+        : roundAndReconcile(qtyShares, qtyScale, qtyOutputScale, qtyTarget);
+
+      if (useFixedAmountRoundedOptimization) {
+        for (let index = 0; index < fixedAmountRoundedAllocated!.length; index++) {
+          fixedAmountRoundedAllocated![index] += roundedAmts[index];
+        }
+      }
 
       // ── 包号降序修复：确保包号小者金额 ≥ 包号大者 ──
       // 四舍五入/补齐可能产生相邻包逆序（差1个最小单位），通过冒泡排序修复
-      for (let pass = 0; pass < roundedAmts.length - 1; pass++) {
-        let swapped = false;
-        for (let i = 0; i < roundedAmts.length - 1 - pass; i++) {
-          if (roundedAmts[i] < roundedAmts[i + 1]) {
-            [roundedAmts[i], roundedAmts[i + 1]] = [roundedAmts[i + 1], roundedAmts[i]];
-            [roundedQtys[i], roundedQtys[i + 1]] = [roundedQtys[i + 1], roundedQtys[i]];
-            swapped = true;
+      if (!useFixedAmountRoundedOptimization) {
+        for (let pass = 0; pass < roundedAmts.length - 1; pass++) {
+          let swapped = false;
+          for (let i = 0; i < roundedAmts.length - 1 - pass; i++) {
+            if (roundedAmts[i] < roundedAmts[i + 1]) {
+              [roundedAmts[i], roundedAmts[i + 1]] = [roundedAmts[i + 1], roundedAmts[i]];
+              [roundedQtys[i], roundedQtys[i + 1]] = [roundedQtys[i + 1], roundedQtys[i]];
+              swapped = true;
+            }
           }
+          if (!swapped) break;
         }
-        if (!swapped) break;
       }
 
       assertRoundedSum(
@@ -235,7 +301,7 @@ export function executeSplit(
       assertRoundedSum(
         roundedQtys,
         qtyTarget,
-        QTY_OUTPUT_SCALE,
+        qtyOutputScale,
         '数量',
         `分标"${fbName}"第${rowIdx + 1}条待拆行：`
       );
@@ -245,7 +311,7 @@ export function executeSplit(
         newRow['分包名称'] = `包${i + 1}`;
         newRow['分包编号'] = `JS${(i + 1) * 100}`;
         newRow['估算总价（元）'] = bigIntToDecimalString(roundedAmts[i], AMOUNT_OUTPUT_SCALE);
-        newRow['数量'] = bigIntToDecimalString(roundedQtys[i], QTY_OUTPUT_SCALE);
+        newRow['数量'] = bigIntToDecimalString(roundedQtys[i], qtyOutputScale);
         result.push(newRow);
       }
     }

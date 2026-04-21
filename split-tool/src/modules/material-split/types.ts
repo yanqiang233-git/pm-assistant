@@ -20,6 +20,9 @@ export type ExcelRow = Record<string, unknown>;
 /** 拆分方式 */
 export type SplitMethod = 'average' | 'ratio' | 'fixedAmount';
 
+/** 数量拆分口径 */
+export type SplitScope = 'rounded' | 'decimal';
+
 /** 比例模板 */
 export interface RatioTemplate {
   id: string;
@@ -36,13 +39,15 @@ export interface FenbiaoConfig {
   name: string;
   /** 分包数量 */
   packageCount: number;
+  /** 数量拆分口径 */
+  splitScope: SplitScope;
   /** 拆分方式 */
   splitMethod: SplitMethod;
   /** 是否单独覆盖了全局拆分方式 */
   overridden: boolean;
   /** 关联的模板 id（比例模式时） */
   templateId?: string;
-  /** 各包参考金额（精确十进制字符串，作为行内拆分权重，不是硬约束） */
+  /** 各包参考金额（精确十进制字符串；取整拆分下会折算为目标包金额并尽量贴近） */
   fixedAmounts?: string[];
 }
 
@@ -64,6 +69,7 @@ export interface ImportResult {
   totalRows: number;
   preAllocatedCount: number;
   exactFenbiaoAmountTotals: Record<string, string>;
+  exactFenbiaoQtyTotals: Record<string, string>;
   errors: ValidationError[];
 }
 

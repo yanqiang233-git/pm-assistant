@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
-import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate } from '../types';
+import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate, SplitScope } from '../types';
 import {
   bigIntToDecimalString,
   compareDecimalStrings,
@@ -8,6 +8,7 @@ import {
   getDecimalScale,
   getMaxDecimalScale,
   isDecimalAbsLessThan,
+  isIntegerDecimalString,
   normalizeDecimalString,
   splitAverageBigInt,
   subtractDecimalStrings,
@@ -16,6 +17,16 @@ import {
 } from '../split/precision';
 
 const AMOUNT_TOLERANCE = '0.01';
+
+const SPLIT_SCOPE_LABELS: Record<SplitScope, string> = {
+  rounded: '取整拆分',
+  decimal: '小数拆分'
+};
+
+const LABEL_TO_SPLIT_SCOPE: Record<string, SplitScope> = {
+  '取整拆分': 'rounded',
+  '小数拆分': 'decimal'
+};
 
 const EXPORT_FIELD_FORMATTERS: Partial<Record<string, string>> = {
   '估算总价（元）': '0.00',
@@ -41,22 +52,34 @@ async function applyDisplayedPrecisionToWorkbook(data: Uint8Array): Promise<Uint
   return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
 }
 
-function applyExportNumberFormat(ws: XLSX.WorkSheet, headerOrder: string[], rowCount: number): void {
+function applyExportNumberFormat(
+  ws: XLSX.WorkSheet,
+  headerOrder: string[],
+  rows: SplitRow[],
+  configMap: Map<string, FenbiaoConfig>
+): void {
   for (let colIndex = 0; colIndex < headerOrder.length; colIndex++) {
-    const format = EXPORT_FIELD_FORMATTERS[headerOrder[colIndex]];
+    const field = headerOrder[colIndex];
+    const format = EXPORT_FIELD_FORMATTERS[field];
     if (!format) continue;
-    for (let rowIndex = 1; rowIndex < rowCount; rowIndex++) {
+    for (let rowIndex = 1; rowIndex <= rows.length; rowIndex++) {
       const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
       const cell = ws[cellRef];
       if (cell?.t === 'n') {
-        cell.z = format;
+        if (field === '数量') {
+          const fenbiaoName = String(rows[rowIndex - 1]?.['分标名称'] ?? '').trim();
+          const splitScope = configMap.get(fenbiaoName)?.splitScope ?? 'decimal';
+          cell.z = splitScope === 'rounded' ? '0' : '0.000';
+        } else {
+          cell.z = format;
+        }
       }
     }
   }
 }
 
 function applyMoneyNumberFormat(ws: XLSX.WorkSheet, rowCount: number, maxPkg: number): void {
-  const moneyCols = [1, ...Array.from({ length: maxPkg }, (_, index) => 4 + index)];
+  const moneyCols = [1, ...Array.from({ length: maxPkg }, (_, index) => 5 + index)];
   for (let rowIndex = 1; rowIndex < rowCount; rowIndex++) {
     for (const colIndex of moneyCols) {
       const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
@@ -121,15 +144,17 @@ function formatExportCellValue(field: string, value: unknown): unknown {
 export async function exportToXlsx(
   rows: SplitRow[],
   headerOrder: string[],
-  outputFileName: string
+  outputFileName: string,
+  configs: FenbiaoConfig[] = []
 ): Promise<Uint8Array> {
+  const configMap = new Map(configs.map(config => [config.name, config]));
   const wsData: unknown[][] = [headerOrder];
   for (const row of rows) {
     const line: unknown[] = headerOrder.map(h => formatExportCellValue(h, row[h] ?? ''));
     wsData.push(line);
   }
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-  applyExportNumberFormat(ws, headerOrder, wsData.length);
+  applyExportNumberFormat(ws, headerOrder, rows, configMap);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
   const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
@@ -139,13 +164,13 @@ export async function exportToXlsx(
 }
 
 /** 下载分包数量配置模板，同时返回二进制数据用于项目目录镜像 */
-export async function downloadConfigTemplate(fenbiaoNames: string[]): Promise<Uint8Array> {
-  const wsData: unknown[][] = [['分标名称', '分包数量']];
-  for (const name of fenbiaoNames) {
-    wsData.push([name, '']);
+export async function downloadConfigTemplate(configs: FenbiaoConfig[]): Promise<Uint8Array> {
+  const wsData: unknown[][] = [['分标名称', '分包数量', '取整拆分/小数拆分']];
+  for (const config of configs) {
+    wsData.push([config.name, config.packageCount || '', SPLIT_SCOPE_LABELS[config.splitScope]]);
   }
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-  ws['!cols'] = [{ wch: 30 }, { wch: 15 }];
+  ws['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 18 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '分包数量配置');
   const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
@@ -169,10 +194,10 @@ const LABEL_TO_METHOD: Record<string, SplitMethod> = {
 
 /**
  * 下载拆分方式配置模板
- * 列结构: 分标名称 | 分包数量 | 拆分方式 | 包1 | 包2 | ... | 包N
+ * 列结构: 分标名称 | 估算总价（元） | 分包数量 | 取整拆分/小数拆分 | 拆分方式 | 包1 | 包2 | ... | 包N
  * - 平均分: 自动计算每包金额
  * - 比例模板: 填百分数
- * - 参考金额: 填参考金额(元)，仅作为拆分权重
+ * - 参考金额: 填参考金额(元)，取整拆分时会折算为目标包金额并尽量贴近
  */
 export async function downloadSplitConfigTemplate(
   configs: FenbiaoConfig[],
@@ -183,7 +208,7 @@ export async function downloadSplitConfigTemplate(
   // 计算最大分包数以确定列数
   const maxPkg = Math.max(...configs.map(c => c.packageCount), 1);
   // 表头
-  const header: string[] = ['分标名称', '估算总价（元）', '分包数量', '拆分方式'];
+  const header: string[] = ['分标名称', '估算总价（元）', '分包数量', '取整拆分/小数拆分', '拆分方式'];
   for (let i = 1; i <= maxPkg; i++) header.push(`包${i}`);
   const wsData: unknown[][] = [header];
 
@@ -191,7 +216,7 @@ export async function downloadSplitConfigTemplate(
     if (c.packageCount < 1) continue;
     const method = c.overridden ? c.splitMethod : defaultMethod;
     const exactTotal = exactFenbiaoAmountTotals[c.name] ?? '0';
-    const row: unknown[] = [c.name, exactTotal, c.packageCount, METHOD_LABELS[method]];
+    const row: unknown[] = [c.name, exactTotal, c.packageCount, SPLIT_SCOPE_LABELS[c.splitScope], METHOD_LABELS[method]];
 
     if (method === 'average') {
       // 自动带出每包金额
@@ -231,7 +256,7 @@ export async function downloadSplitConfigTemplate(
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyMoneyNumberFormat(ws, wsData.length, maxPkg);
   // 设置列宽
-  ws['!cols'] = [{ wch: 30 }, { wch: 18 }, { wch: 10 }, { wch: 12 }];
+  ws['!cols'] = [{ wch: 30 }, { wch: 18 }, { wch: 10 }, { wch: 18 }, { wch: 12 }];
   for (let i = 0; i < maxPkg; i++) ws['!cols']!.push({ wch: 14 });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '拆分方式配置');
@@ -244,6 +269,7 @@ export async function downloadSplitConfigTemplate(
 export interface SplitConfigRow {
   name: string;
   packageCount: number;
+  splitScope: SplitScope;
   method: SplitMethod;
   ratioValues?: number[];
   amountValues?: string[];
@@ -282,6 +308,7 @@ export function readSplitConfigTemplate(
           const raw = jsonData[i];
           const name = String(raw['分标名称'] ?? '').trim();
           const countRaw = raw['分包数量'];
+          const splitScopeRaw = String(raw['取整拆分/小数拆分'] ?? '').trim();
           const methodRaw = String(raw['拆分方式'] ?? '').trim();
 
           if (!name) { errors.push(`第${rowNum}行：分标名称为空`); continue; }
@@ -291,6 +318,13 @@ export function readSplitConfigTemplate(
           const count = Number(countRaw);
           if (!Number.isInteger(count) || count < 1) {
             errors.push(`第${rowNum}行"${name}"：分包数量无效"${countRaw}"`); continue;
+          }
+
+          const currentScope = currentConfigs.find(config => config.name === name)?.splitScope ?? 'decimal';
+          const splitScope = splitScopeRaw ? LABEL_TO_SPLIT_SCOPE[splitScopeRaw] : currentScope;
+          if (!splitScope) {
+            errors.push(`第${rowNum}行"${name}"：取整拆分/小数拆分无效"${splitScopeRaw}"，只能填写 取整拆分/小数拆分`);
+            continue;
           }
 
           const method = LABEL_TO_METHOD[methodRaw];
@@ -342,13 +376,13 @@ export function readSplitConfigTemplate(
             }
           }
 
-          // 指定金额模式下，这里只作为参考金额导入，不再要求总和贴合分标总额。
+          // 参考金额模式下，允许与分标总额不一致；执行时会按比例折算为目标包金额。
           if (method === 'fixedAmount') {
             const targetAmount = exactFenbiaoAmountTotals[name] ?? '0';
             const amountSum = sumDecimalStrings(amountValues);
             const diff = subtractDecimalStrings(amountSum, targetAmount);
             if (compareDecimalStrings(diff, '0') !== 0) {
-              notices.push(`第${rowNum}行“${name}”参考金额合计为${amountSum}元，与分标总金额${targetAmount}元差额${diff}元；系统将其仅作为拆分权重使用`);
+              notices.push(`第${rowNum}行“${name}”参考金额合计为${amountSum}元，与分标总金额${targetAmount}元差额${diff}元；系统将按比例折算为目标包金额后尽量贴近`);
             }
           }
 
@@ -369,6 +403,7 @@ export function readSplitConfigTemplate(
           rows.push({
             name,
             packageCount: count,
+            splitScope,
             method,
             ratioValues: method === 'ratio' ? ratioValues : undefined,
             amountValues: method === 'ratio' ? undefined : amountValues,
@@ -394,7 +429,7 @@ export function readSplitConfigTemplate(
 }
 
 /** 读取分包数量配置模板 */
-export function readConfigTemplate(file: File): Promise<{ name: string; count: number | null }[]> {
+export function readConfigTemplate(file: File): Promise<Array<{ name: string; count: number | null; splitScope: SplitScope }>> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -403,12 +438,17 @@ export function readConfigTemplate(file: File): Promise<{ name: string; count: n
         const wb = XLSX.read(data, { type: 'array' });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const jsonData = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
-        const result = jsonData.map(row => {
+        const result = jsonData.map((row, index) => {
           const name = String(row['分标名称'] ?? '').trim();
           const rawCount = row['分包数量'];
+          const splitScopeRaw = String(row['取整拆分/小数拆分'] ?? '').trim();
           const count = (rawCount !== '' && rawCount != null && !isNaN(Number(rawCount)))
             ? Math.floor(Number(rawCount)) : null;
-          return { name, count };
+          const splitScope = LABEL_TO_SPLIT_SCOPE[splitScopeRaw];
+          if (!splitScope) {
+            throw new Error(`第${index + 2}行“${name || '(空分标)'}”：取整拆分/小数拆分只能填写“取整拆分”或“小数拆分”`);
+          }
+          return { name, count, splitScope };
         });
         resolve(result);
       } catch (err) {

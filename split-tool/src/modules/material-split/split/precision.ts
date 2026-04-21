@@ -45,6 +45,13 @@ export function getDecimalScale(value: string): number {
   return dotIndex >= 0 ? normalized.length - dotIndex - 1 : 0;
 }
 
+/** 判断十进制字符串是否为整数 */
+export function isIntegerDecimalString(value: unknown): boolean {
+  const normalized = normalizeDecimalString(value);
+  if (normalized == null) return false;
+  return getDecimalScale(normalized) === 0;
+}
+
 /** 求一组十进制字符串中的最大小数位数 */
 export function getMaxDecimalScale(values: string[]): number {
   return values.reduce((maxScale, value) => Math.max(maxScale, getDecimalScale(value)), 0);
