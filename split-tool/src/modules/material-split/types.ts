@@ -42,7 +42,7 @@ export interface FenbiaoConfig {
   overridden: boolean;
   /** 关联的模板 id（比例模式时） */
   templateId?: string;
-  /** 指定的每包金额（精确十进制字符串）（指定金额模式时） */
+  /** 各包参考金额（精确十进制字符串，作为行内拆分权重，不是硬约束） */
   fixedAmounts?: string[];
 }
 

@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate } from '../types';
 import {
   bigIntToDecimalString,
@@ -10,7 +11,8 @@ import {
   normalizeDecimalString,
   splitAverageBigInt,
   subtractDecimalStrings,
-  sumDecimalStrings
+  sumDecimalStrings,
+  toFixedDecimalString
 } from '../split/precision';
 
 const AMOUNT_TOLERANCE = '0.01';
@@ -20,6 +22,24 @@ const EXPORT_FIELD_FORMATTERS: Partial<Record<string, string>> = {
   '估算单价（元）': '0.00',
   '数量': '0.000'
 };
+
+const DISPLAYED_PRECISION_CALC_PR = '<calcPr calcMode="auto" calcOnSave="1" fullCalcOnLoad="1" fullPrecision="0"/>';
+
+async function applyDisplayedPrecisionToWorkbook(data: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(data);
+  const workbookEntry = zip.file('xl/workbook.xml');
+  if (!workbookEntry) return data;
+
+  const workbookXml = await workbookEntry.async('string');
+  const nextWorkbookXml = workbookXml.includes('<calcPr')
+    ? workbookXml.replace(/<calcPr[^>]*\/>/, DISPLAYED_PRECISION_CALC_PR)
+    : workbookXml.replace('</workbook>', `${DISPLAYED_PRECISION_CALC_PR}</workbook>`);
+
+  if (nextWorkbookXml === workbookXml) return data;
+
+  zip.file('xl/workbook.xml', nextWorkbookXml);
+  return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
+}
 
 function applyExportNumberFormat(ws: XLSX.WorkSheet, headerOrder: string[], rowCount: number): void {
   for (let colIndex = 0; colIndex < headerOrder.length; colIndex++) {
@@ -80,8 +100,22 @@ async function saveToFile(data: Uint8Array, filename: string): Promise<void> {
   }, 100);
 }
 
-/** 数值字段集合：导出时转为 Number 便于 Excel 直接 SUM() */
-const NUMERIC_EXPORT_FIELDS = new Set(['估算总价（元）', '数量', '估算单价（元）']);
+const AMOUNT_TEXT_EXPORT_FIELDS = new Set(['估算总价（元）', '估算单价（元）']);
+const NUMERIC_EXPORT_FIELDS = new Set(['数量']);
+
+function formatExportCellValue(field: string, value: unknown): unknown {
+  if (AMOUNT_TEXT_EXPORT_FIELDS.has(field)) {
+    if (value === '' || value == null) return '';
+    return toFixedDecimalString(value, 2) ?? String(value);
+  }
+
+  if (NUMERIC_EXPORT_FIELDS.has(field) && value !== '' && value != null) {
+    const num = Number(value);
+    if (!isNaN(num)) return num;
+  }
+
+  return value;
+}
 
 /** 将拆分结果写入 xlsx 并下载，同时返回二进制数据用于项目目录镜像 */
 export async function exportToXlsx(
@@ -91,22 +125,15 @@ export async function exportToXlsx(
 ): Promise<Uint8Array> {
   const wsData: unknown[][] = [headerOrder];
   for (const row of rows) {
-    const line: unknown[] = headerOrder.map(h => {
-      const val = row[h] ?? '';
-      // 数值字段转为 Number 输出，使 Excel 单元格为数值类型
-      if (NUMERIC_EXPORT_FIELDS.has(h) && val !== '' && val != null) {
-        const num = Number(val);
-        if (!isNaN(num)) return num;
-      }
-      return val;
-    });
+    const line: unknown[] = headerOrder.map(h => formatExportCellValue(h, row[h] ?? ''));
     wsData.push(line);
   }
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyExportNumberFormat(ws, headerOrder, wsData.length);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
-  const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  const data = await applyDisplayedPrecisionToWorkbook(rawData);
   await saveToFile(data, outputFileName);
   return data;
 }
@@ -121,7 +148,8 @@ export async function downloadConfigTemplate(fenbiaoNames: string[]): Promise<Ui
   ws['!cols'] = [{ wch: 30 }, { wch: 15 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '分包数量配置');
-  const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  const data = await applyDisplayedPrecisionToWorkbook(rawData);
   await saveToFile(data, '分包数量配置模板.xlsx');
   return data;
 }
@@ -207,7 +235,8 @@ export async function downloadSplitConfigTemplate(
   for (let i = 0; i < maxPkg; i++) ws['!cols']!.push({ wch: 14 });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '拆分方式配置');
-  const data = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  const data = await applyDisplayedPrecisionToWorkbook(rawData);
   await saveToFile(data, '拆分方式配置模板.xlsx');
   return data;
 }

@@ -76,6 +76,18 @@ export function bigIntToDecimalString(value: bigint, scale: number): string {
   return negative && result !== '0' ? `-${result}` : result;
 }
 
+/** 将十进制值格式化为固定小数位字符串，不做进位，仅补足尾随 0 */
+export function toFixedDecimalString(value: unknown, scale: number): string | null {
+  const normalized = normalizeDecimalString(value);
+  if (normalized == null) return null;
+  const negative = normalized.startsWith('-');
+  const unsigned = negative ? normalized.slice(1) : normalized;
+  const [integerPart, fractionPart = ''] = unsigned.split('.');
+  const fixedFraction = scale > 0 ? fractionPart.padEnd(scale, '0').slice(0, scale) : '';
+  const result = scale > 0 ? `${integerPart}.${fixedFraction}` : integerPart;
+  return negative && result !== '0' ? `-${result}` : result;
+}
+
 /** 比较两个十进制字符串大小 */
 export function compareDecimalStrings(left: string, right: string): number {
   const leftNormalized = normalizeDecimalString(left) ?? '0';

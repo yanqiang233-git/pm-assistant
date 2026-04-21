@@ -8,7 +8,13 @@ import {
 } from './template/manager';
 import { parseSingleColumnPaste, parseTwoColumnPaste } from './config/paste';
 import { createInitialState, createFenbiaoConfigs, updateGlobalMethod, saveStateSnapshot } from './store/state';
-import { compareDecimalStrings, normalizeDecimalString, subtractDecimalStrings, sumDecimalStrings } from './split/precision';
+import {
+  compareDecimalStrings,
+  normalizeDecimalString,
+  subtractDecimalStrings,
+  sumDecimalStrings,
+  toFixedDecimalString
+} from './split/precision';
 import {
   ensureModuleDirs,
   mirrorImportFile, mirrorTemplate, mirrorUploadedTemplate, mirrorExportResult,
@@ -832,7 +838,7 @@ function renderPreview() {
   const start = previewPage * PREVIEW_PAGE_SIZE;
   const pageRows = state.splitResult.slice(start, start + PREVIEW_PAGE_SIZE);
   previewTableBody.innerHTML = pageRows.map(row =>
-    '<tr>' + previewCols.map(c => `<td>${esc(String(row[c] ?? ''))}</td>`).join('') + '</tr>'
+    '<tr>' + previewCols.map(c => `<td>${esc(formatPreviewCellValue(row, c))}</td>`).join('') + '</tr>'
   ).join('');
 
   // Pagination
@@ -846,6 +852,17 @@ function renderPreview() {
 
   // Enable export
   renderExportSummary();
+}
+
+function formatPreviewCellValue(row: ExcelRow, field: string): string {
+  const value = row[field];
+  if (field === '数量') {
+    return toFixedDecimalString(value, 3) ?? String(value ?? '');
+  }
+  if (field === '估算单价（元）' || field === '估算总价（元）') {
+    return toFixedDecimalString(value, 2) ?? String(value ?? '');
+  }
+  return String(value ?? '');
 }
 
 function clearPreview() {
