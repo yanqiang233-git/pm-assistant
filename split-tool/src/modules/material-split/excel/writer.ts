@@ -11,6 +11,7 @@ import {
   isIntegerDecimalString,
   normalizeDecimalString,
   splitAverageBigInt,
+  splitBigIntByRatio,
   subtractDecimalStrings,
   sumDecimalStrings,
   toFixedDecimalString
@@ -50,6 +51,124 @@ async function applyDisplayedPrecisionToWorkbook(data: Uint8Array): Promise<Uint
 
   zip.file('xl/workbook.xml', nextWorkbookXml);
   return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
+}
+
+function roundBigIntToScale(value: bigint, srcScale: number, dstScale: number): bigint {
+  if (dstScale >= srcScale) return value;
+  const factor = 10n ** BigInt(srcScale - dstScale);
+  const sign = value < 0n ? -1n : 1n;
+  const abs = value < 0n ? -value : value;
+  return sign * ((abs + factor / 2n) / factor);
+}
+
+function decimalStringToRoundedScaleInt(value: string, dstScale: number): bigint {
+  const normalized = normalizeDecimalString(value) ?? '0';
+  const srcScale = getDecimalScale(normalized);
+  const intValue = decimalToBigInt(normalized, srcScale);
+  if (srcScale <= dstScale) {
+    return intValue * (10n ** BigInt(dstScale - srcScale));
+  }
+  return roundBigIntToScale(intValue, srcScale, dstScale);
+}
+
+function divideRounded(numerator: bigint, denominator: bigint): bigint {
+  if (denominator === 0n) {
+    throw new Error('除数不能为 0');
+  }
+  const negative = (numerator < 0n) !== (denominator < 0n);
+  const absNumerator = numerator < 0n ? -numerator : numerator;
+  const absDenominator = denominator < 0n ? -denominator : denominator;
+  const quotient = (absNumerator + absDenominator / 2n) / absDenominator;
+  return negative ? -quotient : quotient;
+}
+
+interface PackageComparisonRow {
+  fenbiaoName: string;
+  packageName: string;
+  actualAmount: bigint;
+  targetAmount: bigint;
+  deviationRate: string;
+}
+
+function buildTargetAmountsByConfig(
+  totalAmount: bigint,
+  config: FenbiaoConfig,
+  templateMap: Map<string, RatioTemplate>
+): bigint[] {
+  if (config.splitMethod === 'average') {
+    return splitAverageBigInt(totalAmount, config.packageCount);
+  }
+
+  if (config.splitMethod === 'ratio') {
+    const template = config.templateId ? templateMap.get(config.templateId) : undefined;
+    if (!template) {
+      throw new Error(`分标"${config.name}"缺少比例模板，无法导出差异对比表`);
+    }
+    return splitBigIntByRatio(totalAmount, template.ratios);
+  }
+
+  if (config.fixedAmounts?.length === config.packageCount) {
+    const scale = getMaxDecimalScale(config.fixedAmounts);
+    const weights = config.fixedAmounts.map(value => decimalToBigInt(value, scale));
+    if (weights.every(value => value === 0n)) {
+      throw new Error(`分标"${config.name}"的参考金额不能全为 0，无法导出差异对比表`);
+    }
+    return splitBigIntByRatio(totalAmount, weights);
+  }
+
+  throw new Error(`分标"${config.name}"缺少完整的包目标配置，无法导出差异对比表`);
+}
+
+function formatDeviationRate(actualAmount: bigint, targetAmount: bigint): string {
+  if (targetAmount === 0n) {
+    return actualAmount === 0n ? '0.00%' : 'N/A';
+  }
+
+  const percentScaled = divideRounded((actualAmount - targetAmount) * 10000n, targetAmount);
+  const percentText = toFixedDecimalString(bigIntToDecimalString(percentScaled, 2), 2) ?? '0.00';
+  return `${percentText}%`;
+}
+
+function buildPackageComparisonRows(
+  splitRows: SplitRow[],
+  configs: FenbiaoConfig[],
+  exactFenbiaoAmountTotals: Record<string, string>,
+  templates: RatioTemplate[]
+): PackageComparisonRow[] {
+  const configMap = new Map(configs.map(config => [config.name, config]));
+  const templateMap = new Map(templates.map(template => [template.id, template]));
+  const actualAmountMap = new Map<string, bigint>();
+
+  for (const row of splitRows) {
+    const fenbiaoName = String(row['分标名称'] ?? '').trim();
+    const packageName = String(row['分包名称'] ?? '').trim();
+    const key = `${fenbiaoName}__${packageName}`;
+    const amount = decimalStringToRoundedScaleInt(String(row['估算总价（元）'] ?? '0'), 2);
+    actualAmountMap.set(key, (actualAmountMap.get(key) ?? 0n) + amount);
+  }
+
+  const rows: PackageComparisonRow[] = [];
+  for (const config of configs) {
+    const totalAmountText = exactFenbiaoAmountTotals[config.name] ?? '0';
+    const totalAmount = decimalStringToRoundedScaleInt(totalAmountText, 2);
+    const targetAmounts = buildTargetAmountsByConfig(totalAmount, config, templateMap);
+
+    for (let index = 0; index < config.packageCount; index++) {
+      const packageName = `包${index + 1}`;
+      const key = `${config.name}__${packageName}`;
+      const actualAmount = actualAmountMap.get(key) ?? 0n;
+      const targetAmount = targetAmounts[index] ?? 0n;
+      rows.push({
+        fenbiaoName: config.name,
+        packageName,
+        actualAmount,
+        targetAmount,
+        deviationRate: formatDeviationRate(actualAmount, targetAmount)
+      });
+    }
+  }
+
+  return rows;
 }
 
 function applyExportNumberFormat(
@@ -157,6 +276,62 @@ export async function exportToXlsx(
   applyExportNumberFormat(ws, headerOrder, rows, configMap);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+  const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  const data = await applyDisplayedPrecisionToWorkbook(rawData);
+  await saveToFile(data, outputFileName);
+  return data;
+}
+
+export async function exportPackageComparisonToXlsx(
+  splitRows: SplitRow[],
+  outputFileName: string,
+  configs: FenbiaoConfig[],
+  exactFenbiaoAmountTotals: Record<string, string>,
+  templates: RatioTemplate[]
+): Promise<Uint8Array> {
+  const comparisonRows = buildPackageComparisonRows(
+    splitRows,
+    configs,
+    exactFenbiaoAmountTotals,
+    templates
+  );
+  const wsData: unknown[][] = [[
+    '分标',
+    '分包',
+    '实际分包金额',
+    '包目标金额',
+    '偏差率'
+  ]];
+
+  for (const row of comparisonRows) {
+    wsData.push([
+      row.fenbiaoName,
+      row.packageName,
+      Number(bigIntToDecimalString(row.actualAmount, 2)),
+      Number(bigIntToDecimalString(row.targetAmount, 2)),
+      row.deviationRate
+    ]);
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  ws['!cols'] = [
+    { wch: 28 },
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 12 }
+  ];
+  for (let rowIndex = 1; rowIndex <= comparisonRows.length; rowIndex++) {
+    for (const colIndex of [2, 3]) {
+      const cellRef = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+      const cell = ws[cellRef];
+      if (cell?.t === 'n') {
+        cell.z = '0.00';
+      }
+    }
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '包金额差异对比');
   const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
   const data = await applyDisplayedPrecisionToWorkbook(rawData);
   await saveToFile(data, outputFileName);

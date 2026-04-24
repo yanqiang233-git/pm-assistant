@@ -1,5 +1,5 @@
 import { readAndValidate, readAndValidateBuffer } from './excel/reader';
-import { exportToXlsx, downloadConfigTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
+import { exportToXlsx, exportPackageComparisonToXlsx, downloadConfigTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
 import { executeSplit, generatePreviewSummary, SplitExecutionError } from './split/engine';
 import {
   loadTemplates, saveTemplates, addTemplate, updateTemplate,
@@ -89,6 +89,7 @@ const previewPagination = $('previewPagination');
 const sectionExport = $('section-export');
 const exportStatus = $('exportStatus');
 const exportSummaryEl = $('exportSummary');
+const btnExportComparison = $('btnExportComparison');
 const btnExport = $('btnExport');
 
 // Paste modal
@@ -995,6 +996,28 @@ btnExport.addEventListener('click', async () => {
     exportStatus.className = 'status-badge success';
   } catch (err) {
     alert(`导出失败: ${err}`);
+  }
+});
+
+btnExportComparison.addEventListener('click', async () => {
+  if (!state.splitResult || !state.importResult) {
+    alert('请先执行拆分并预览');
+    return;
+  }
+  try {
+    const templates = loadTemplates();
+    const outName = state.importResult.fileName.replace(/\.xlsx$/i, '') + '_包金额差异对比表.xlsx';
+    await exportPackageComparisonToXlsx(
+      state.splitResult,
+      outName,
+      state.fenbiaoConfigs,
+      state.importResult.exactFenbiaoAmountTotals,
+      templates
+    );
+    exportStatus.textContent = '已导出';
+    exportStatus.className = 'status-badge success';
+  } catch (err) {
+    alert(`导出差异对比表失败: ${err}`);
   }
 });
 

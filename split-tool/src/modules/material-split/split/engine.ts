@@ -201,6 +201,361 @@ function buildDynamicFixedAmountRowTargets(
   return splitBigIntByRatio(rowTotal, weights);
 }
 
+function calculateTotalDeviation(values: bigint[], targets: bigint[]): bigint {
+  return values.reduce((sum, value, index) => sum + absBigInt(value - targets[index]), 0n);
+}
+
+function reconcileAmountsByTargetDeviation(
+  values: bigint[],
+  target: bigint,
+  allocated: bigint[],
+  packageTargets: bigint[],
+  minimumValue = 0n
+): bigint[] {
+  const adjusted = values.slice();
+  let diff = target - sumBigInt(adjusted);
+
+  while (diff !== 0n) {
+    const step = diff > 0n ? 1n : -1n;
+    let bestIndex = -1;
+    let bestScore: bigint | null = null;
+    let bestNextDeviation: bigint | null = null;
+
+    for (let index = 0; index < adjusted.length; index++) {
+      const nextValue = adjusted[index] + step;
+      if (step < 0n && nextValue < minimumValue) continue;
+
+      const currentDeviation = absBigInt(allocated[index] + adjusted[index] - packageTargets[index]);
+      const nextDeviation = absBigInt(allocated[index] + nextValue - packageTargets[index]);
+      const score = currentDeviation - nextDeviation;
+
+      if (
+        bestIndex === -1
+        || score > bestScore!
+        || (score === bestScore && nextDeviation < bestNextDeviation!)
+        || (score === bestScore && nextDeviation === bestNextDeviation && index < bestIndex)
+      ) {
+        bestIndex = index;
+        bestScore = score;
+        bestNextDeviation = nextDeviation;
+      }
+    }
+
+    if (bestIndex === -1) {
+      throw new Error('无法在保持非零金额约束下完成目标金额回补');
+    }
+
+    adjusted[bestIndex] += step;
+    diff -= step;
+  }
+
+  return adjusted;
+}
+
+function buildRoundedAmountsFromQtyShares(
+  qtyShares: bigint[],
+  qtyScale: number,
+  unitPriceInt: bigint,
+  unitPriceScale: number,
+  amtTarget: bigint,
+  allocated: bigint[],
+  packageTargets: bigint[]
+): bigint[] {
+  const amountCandidates = qtyShares.map(value => multiplyToScale(
+    value,
+    qtyScale,
+    unitPriceInt,
+    unitPriceScale,
+    AMOUNT_OUTPUT_SCALE
+  ));
+
+  return reconcileAmountsByTargetDeviation(
+    amountCandidates,
+    amtTarget,
+    allocated,
+    packageTargets,
+    1n
+  );
+}
+
+function optimizeRoundedQtySharesForTargetDeviation(
+  initialQtyShares: bigint[],
+  qtyScale: number,
+  unitPriceInt: bigint,
+  unitPriceScale: number,
+  amtTarget: bigint,
+  allocated: bigint[],
+  packageTargets: bigint[]
+): { qtyShares: bigint[]; amountShares: bigint[] } {
+  let bestQtyShares = initialQtyShares.slice();
+  let bestAmountShares = buildRoundedAmountsFromQtyShares(
+    bestQtyShares,
+    qtyScale,
+    unitPriceInt,
+    unitPriceScale,
+    amtTarget,
+    allocated,
+    packageTargets
+  );
+  let bestDeviation = calculateTotalDeviation(
+    allocated.map((value, index) => value + bestAmountShares[index]),
+    packageTargets
+  );
+
+  let improved = true;
+  let iterations = 0;
+  const maxIterations = Math.max(20, initialQtyShares.length * 20);
+
+  while (improved && iterations < maxIterations) {
+    improved = false;
+    iterations += 1;
+
+    for (let sourceIndex = 0; sourceIndex < bestQtyShares.length; sourceIndex++) {
+      if (bestQtyShares[sourceIndex] <= 1n) continue;
+
+      for (let targetIndex = 0; targetIndex < bestQtyShares.length; targetIndex++) {
+        if (sourceIndex === targetIndex) continue;
+
+        const testQtyShares = bestQtyShares.slice();
+        testQtyShares[sourceIndex] -= 1n;
+        testQtyShares[targetIndex] += 1n;
+
+        const testAmountShares = buildRoundedAmountsFromQtyShares(
+          testQtyShares,
+          qtyScale,
+          unitPriceInt,
+          unitPriceScale,
+          amtTarget,
+          allocated,
+          packageTargets
+        );
+        const testDeviation = calculateTotalDeviation(
+          allocated.map((value, index) => value + testAmountShares[index]),
+          packageTargets
+        );
+
+        if (testDeviation < bestDeviation) {
+          bestQtyShares = testQtyShares;
+          bestAmountShares = testAmountShares;
+          bestDeviation = testDeviation;
+          improved = true;
+          break;
+        }
+      }
+
+      if (improved) break;
+    }
+  }
+
+  return { qtyShares: bestQtyShares, amountShares: bestAmountShares };
+}
+
+interface FixedAmountRoundedRowInput {
+  row: ExcelRow;
+  contextLabel: string;
+  amtTarget: bigint;
+  qtyTarget: bigint;
+  unitPriceInt: bigint;
+  unitPriceScale: number;
+}
+
+interface FixedAmountRoundedRowPlan extends FixedAmountRoundedRowInput {
+  qtyShares: bigint[];
+  amountShares: bigint[];
+}
+
+function getPackagePriorityIndices(
+  packageAmounts: bigint[],
+  packageTargets: bigint[],
+  mode: 'over' | 'under' | 'all'
+): number[] {
+  const indices = Array.from({ length: packageTargets.length }, (_, index) => index);
+  return indices
+    .filter(index => {
+      const diff = packageAmounts[index] - packageTargets[index];
+      if (mode === 'over') return diff > 0n;
+      if (mode === 'under') return diff < 0n;
+      return true;
+    })
+    .sort((left, right) => {
+      const leftDiff = packageAmounts[left] - packageTargets[left];
+      const rightDiff = packageAmounts[right] - packageTargets[right];
+
+      if (mode === 'over') {
+        if (rightDiff !== leftDiff) return Number(rightDiff - leftDiff);
+      } else if (mode === 'under') {
+        if (leftDiff !== rightDiff) return Number(leftDiff - rightDiff);
+      } else {
+        const leftAbs = absBigInt(leftDiff);
+        const rightAbs = absBigInt(rightDiff);
+        if (rightAbs !== leftAbs) return Number(rightAbs - leftAbs);
+      }
+
+      return left - right;
+    });
+}
+
+function seedFixedAmountRoundedRowPlan(
+  input: FixedAmountRoundedRowInput,
+  packageTargets: bigint[],
+  packageAllocated: bigint[],
+  qtyOutputScale: number,
+  isLastRow: boolean
+): FixedAmountRoundedRowPlan {
+  const amountWeightBasis = buildDynamicFixedAmountRowTargets(
+    input.amtTarget,
+    packageTargets,
+    packageAllocated,
+    isLastRow
+  );
+  const initialRoundedAmts = buildPositiveIntegerShares(
+    input.amtTarget,
+    amountWeightBasis,
+    1n,
+    '金额',
+    input.contextLabel
+  );
+  const qtyWeightBasis = initialRoundedAmts.map(value => value > 0n ? value : 0n);
+  const seededQtyShares = buildPositiveIntegerShares(
+    input.qtyTarget,
+    sumBigInt(qtyWeightBasis) > 0n ? qtyWeightBasis : packageTargets,
+    1n,
+    '数量',
+    input.contextLabel
+  );
+  const optimized = optimizeRoundedQtySharesForTargetDeviation(
+    seededQtyShares,
+    qtyOutputScale,
+    input.unitPriceInt,
+    input.unitPriceScale,
+    input.amtTarget,
+    packageAllocated,
+    packageTargets
+  );
+
+  return {
+    ...input,
+    qtyShares: optimized.qtyShares,
+    amountShares: optimized.amountShares
+  };
+}
+
+function improveFenbiaoFixedAmountRoundedPlans(
+  rowPlans: FixedAmountRoundedRowPlan[],
+  packageTargets: bigint[],
+  packageAmounts: bigint[],
+  qtyOutputScale: number
+): void {
+  let bestDeviation = calculateTotalDeviation(packageAmounts, packageTargets);
+  let improved = true;
+  let iterations = 0;
+  const maxIterations = Math.max(50, rowPlans.length * packageTargets.length * 20);
+
+  while (improved && iterations < maxIterations) {
+    improved = false;
+    iterations += 1;
+
+    const sourcePriority = getPackagePriorityIndices(packageAmounts, packageTargets, 'over');
+    const targetPriority = getPackagePriorityIndices(packageAmounts, packageTargets, 'under');
+    const fallbackPriority = getPackagePriorityIndices(packageAmounts, packageTargets, 'all');
+    const sourceIndices = sourcePriority.length > 0 ? sourcePriority : fallbackPriority;
+    const targetIndices = targetPriority.length > 0 ? targetPriority : fallbackPriority;
+
+    for (const rowPlan of rowPlans) {
+      const baseAllocated = packageAmounts.map((value, index) => value - rowPlan.amountShares[index]);
+
+      for (const sourceIndex of sourceIndices) {
+        if (rowPlan.qtyShares[sourceIndex] <= 1n) continue;
+
+        for (const targetIndex of targetIndices) {
+          if (sourceIndex === targetIndex) continue;
+
+          const testQtyShares = rowPlan.qtyShares.slice();
+          testQtyShares[sourceIndex] -= 1n;
+          testQtyShares[targetIndex] += 1n;
+
+          let testAmountShares: bigint[];
+          try {
+            testAmountShares = buildRoundedAmountsFromQtyShares(
+              testQtyShares,
+              qtyOutputScale,
+              rowPlan.unitPriceInt,
+              rowPlan.unitPriceScale,
+              rowPlan.amtTarget,
+              baseAllocated,
+              packageTargets
+            );
+          } catch {
+            continue;
+          }
+
+          const testPackageAmounts = baseAllocated.map(
+            (value, index) => value + testAmountShares[index]
+          );
+          const testDeviation = calculateTotalDeviation(testPackageAmounts, packageTargets);
+
+          if (testDeviation < bestDeviation) {
+            rowPlan.qtyShares = testQtyShares;
+            rowPlan.amountShares = testAmountShares;
+            for (let index = 0; index < packageAmounts.length; index++) {
+              packageAmounts[index] = testPackageAmounts[index];
+            }
+            bestDeviation = testDeviation;
+            improved = true;
+            break;
+          }
+        }
+
+        if (improved) break;
+      }
+
+      if (improved) break;
+    }
+  }
+}
+
+function materializeFixedAmountRoundedRowPlans(
+  rowPlans: FixedAmountRoundedRowPlan[],
+  qtyOutputScale: number
+): SplitRow[] {
+  const splitRows: SplitRow[] = [];
+
+  for (const rowPlan of rowPlans) {
+    assertRoundedSum(
+      rowPlan.amountShares,
+      rowPlan.amtTarget,
+      AMOUNT_OUTPUT_SCALE,
+      '金额',
+      rowPlan.contextLabel
+    );
+    assertRoundedSum(
+      rowPlan.qtyShares,
+      rowPlan.qtyTarget,
+      qtyOutputScale,
+      '数量',
+      rowPlan.contextLabel
+    );
+
+    if (rowPlan.amountShares.some(value => value <= 0n)) {
+      throw new Error(`${rowPlan.contextLabel}取整拆分后的金额存在 0 或负数，无法与非零数量保持一致`);
+    }
+    if (rowPlan.qtyShares.some(value => value <= 0n)) {
+      throw new Error(`${rowPlan.contextLabel}取整拆分后的数量存在 0 或负数，请减少分包数量或调整原始数据`);
+    }
+
+    for (let index = 0; index < rowPlan.qtyShares.length; index++) {
+      const newRow: SplitRow = { ...rowPlan.row };
+      newRow['分包名称'] = `包${index + 1}`;
+      newRow['分包编号'] = `JS${(index + 1) * 100}`;
+      newRow['估算总价（元）'] = bigIntToDecimalString(rowPlan.amountShares[index], AMOUNT_OUTPUT_SCALE);
+      newRow['数量'] = bigIntToDecimalString(rowPlan.qtyShares[index], qtyOutputScale);
+      splitRows.push(newRow);
+    }
+  }
+
+  return splitRows;
+}
+
 export class SplitExecutionError extends Error {
   readonly reasons: string[];
 
@@ -300,22 +655,30 @@ export function executeSplit(
     if (toSplitRows.length === 0) continue;
 
     const method: SplitMethod = config.splitMethod;
-    // 待拆行按“逐行独立拆分”处理：
-    // 预分配行仅原样保留并计入总量，不再占用后续待拆行的包级预算。
+    // 待拆行按“逐行独立拆分”处理。
+    // 对 fixedAmount + rounded，预分配行金额会先计入各包已分配金额，再参与剩余预算计算。
+    const preAllocatedByPackage = Array.from({ length: n }, () => 0n);
+    for (const row of preAllocRows) {
+      const match = PKG_NAME_PATTERN.exec(String(row['分包名称']).trim())!;
+      const pkgNum = parseInt(match[1]);
+      const preAllocatedAmountInt = decimalToBigInt(getNormalizedDecimal(row, '估算总价（元）'), amountScale);
+      preAllocatedByPackage[pkgNum - 1] += roundBigIntToScale(preAllocatedAmountInt, amountScale, AMOUNT_OUTPUT_SCALE);
+    }
     const rowAmountsInt = toSplitRows.map(
       row => decimalToBigInt(getNormalizedDecimal(row, '估算总价（元）'), amountScale)
     );
     const rowQtysInt = toSplitRows.map(
       row => decimalToBigInt(getNormalizedDecimal(row, '数量'), qtyScale)
     );
+    const totalRoundedAmount = sumBigInt(preAllocatedByPackage) + rowAmountsInt.reduce(
+      (sum, value) => sum + roundBigIntToScale(value, amountScale, AMOUNT_OUTPUT_SCALE),
+      0n
+    );
     let fixedAmountRoundedTargets: bigint[] | null = null;
     try {
       fixedAmountRoundedTargets = method === 'fixedAmount' && config.fixedAmounts && config.splitScope === 'rounded'
         ? buildFixedAmountTargets(
-            rowAmountsInt.reduce(
-              (sum, value) => sum + roundBigIntToScale(value, amountScale, AMOUNT_OUTPUT_SCALE),
-              0n
-            ),
+            totalRoundedAmount,
             config.fixedAmounts
           )
         : null;
@@ -323,8 +686,88 @@ export function executeSplit(
       executionErrors.push(error instanceof Error ? error.message : String(error));
       continue;
     }
+    if (fixedAmountRoundedTargets) {
+      const rowInputs: FixedAmountRoundedRowInput[] = [];
+      const fenbiaoErrors: string[] = [];
+
+      for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
+        const row = toSplitRows[rowIdx];
+        const contextLabel = `分标"${fbName}"第${rowIdx + 1}条待拆行：`;
+
+        try {
+          if (getDecimalScale(getNormalizedDecimal(row, '数量')) > 0) {
+            throw new Error(`分标"${fbName}"存在小数数量，不能按取整拆分执行`);
+          }
+
+          const rowAmountInt = rowAmountsInt[rowIdx];
+          const rowQtyInt = rowQtysInt[rowIdx];
+          const { value: unitPriceInt, scale: unitPriceScale } = getValidatedUnitPrice(row, contextLabel);
+          assertSourceRowConsistent(
+            rowAmountInt,
+            amountScale,
+            rowQtyInt,
+            qtyScale,
+            unitPriceInt,
+            unitPriceScale,
+            contextLabel
+          );
+
+          const amtTarget = roundBigIntToScale(rowAmountInt, amountScale, AMOUNT_OUTPUT_SCALE);
+          const qtyTarget = roundBigIntToScale(rowQtyInt, qtyScale, qtyOutputScale);
+          if (amtTarget > 0n && qtyTarget === 0n) {
+            throw new Error(`${contextLabel}金额大于 0 但数量为 0，无法满足数量与金额一致性`);
+          }
+
+          rowInputs.push({
+            row,
+            contextLabel,
+            amtTarget,
+            qtyTarget,
+            unitPriceInt,
+            unitPriceScale
+          });
+        } catch (error) {
+          fenbiaoErrors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+
+      if (fenbiaoErrors.length > 0) {
+        executionErrors.push(...fenbiaoErrors);
+        continue;
+      }
+
+      try {
+        const packageAmounts = preAllocatedByPackage.slice();
+        const rowPlans = rowInputs.map((input, rowIdx) => {
+          const plan = seedFixedAmountRoundedRowPlan(
+            input,
+            fixedAmountRoundedTargets!,
+            packageAmounts,
+            qtyOutputScale,
+            rowIdx === rowInputs.length - 1
+          );
+          for (let index = 0; index < packageAmounts.length; index++) {
+            packageAmounts[index] += plan.amountShares[index];
+          }
+          return plan;
+        });
+
+        improveFenbiaoFixedAmountRoundedPlans(
+          rowPlans,
+          fixedAmountRoundedTargets,
+          packageAmounts,
+          qtyOutputScale
+        );
+
+        result.push(...materializeFixedAmountRoundedRowPlans(rowPlans, qtyOutputScale));
+      } catch (error) {
+        executionErrors.push(error instanceof Error ? error.message : String(error));
+      }
+
+      continue;
+    }
     const fixedAmountRoundedAllocated = fixedAmountRoundedTargets
-      ? Array.from({ length: n }, () => 0n)
+      ? preAllocatedByPackage.slice()
       : null;
 
     for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
@@ -389,33 +832,57 @@ export function executeSplit(
             ? amountWeightBasis
             : roundAndReconcile(priceShares, amountScale, AMOUNT_OUTPUT_SCALE, amtTarget);
         const qtyWeightBasis = initialRoundedAmts.map(value => value > 0n ? value : 0n);
-        const roundedQtys = config.splitScope === 'rounded'
-          ? buildPositiveIntegerShares(qtyTarget, qtyWeightBasis, 1n, '数量', contextLabel)
-          : roundAndReconcile(
-              splitBigIntByRatio(
-                rowQtyInt,
-                sumBigInt(qtyWeightBasis) > 0n
-                  ? qtyWeightBasis
-                  : Array.from({ length: n }, () => 1n)
-              ),
-              qtyScale,
-              qtyOutputScale,
-              qtyTarget
-            );
-        const roundedAmts = config.splitScope === 'rounded'
-          ? roundAndReconcile(
-              roundedQtys.map(value => multiplyToScale(
-                value,
+        let roundedQtys: bigint[];
+        let roundedAmts: bigint[];
+
+        if (useFixedAmountRoundedOptimization) {
+          const seededQtyShares = buildPositiveIntegerShares(
+            qtyTarget,
+            sumBigInt(qtyWeightBasis) > 0n ? qtyWeightBasis : fixedAmountRoundedTargets!,
+            1n,
+            '数量',
+            contextLabel
+          );
+          const optimized = optimizeRoundedQtySharesForTargetDeviation(
+            seededQtyShares,
+            qtyOutputScale,
+            unitPriceInt,
+            unitPriceScale,
+            amtTarget,
+            fixedAmountRoundedAllocated!,
+            fixedAmountRoundedTargets!
+          );
+          roundedQtys = optimized.qtyShares;
+          roundedAmts = optimized.amountShares;
+        } else {
+          roundedQtys = config.splitScope === 'rounded'
+            ? buildPositiveIntegerShares(qtyTarget, qtyWeightBasis, 1n, '数量', contextLabel)
+            : roundAndReconcile(
+                splitBigIntByRatio(
+                  rowQtyInt,
+                  sumBigInt(qtyWeightBasis) > 0n
+                    ? qtyWeightBasis
+                    : Array.from({ length: n }, () => 1n)
+                ),
+                qtyScale,
                 qtyOutputScale,
-                unitPriceInt,
-                unitPriceScale,
-                AMOUNT_OUTPUT_SCALE
-              )),
-              AMOUNT_OUTPUT_SCALE,
-              AMOUNT_OUTPUT_SCALE,
-              amtTarget
-            )
-          : initialRoundedAmts;
+                qtyTarget
+              );
+          roundedAmts = config.splitScope === 'rounded'
+            ? roundAndReconcile(
+                roundedQtys.map(value => multiplyToScale(
+                  value,
+                  qtyOutputScale,
+                  unitPriceInt,
+                  unitPriceScale,
+                  AMOUNT_OUTPUT_SCALE
+                )),
+                AMOUNT_OUTPUT_SCALE,
+                AMOUNT_OUTPUT_SCALE,
+                amtTarget
+              )
+            : initialRoundedAmts;
+        }
 
         if (useFixedAmountRoundedOptimization) {
           for (let index = 0; index < fixedAmountRoundedAllocated!.length; index++) {

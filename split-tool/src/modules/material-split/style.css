@@ -241,6 +241,14 @@ body {
 }
 .export-summary p { margin: 3px 0; }
 .export-summary strong { color: var(--color-primary); }
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.export-actions .btn {
+  min-width: 180px;
+}
 
 /* ===== Modal ===== */
 .modal-overlay {
