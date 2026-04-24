@@ -115,9 +115,13 @@ function validateExcelData(data: Uint8Array, fileName: string): ImportResult {
     jsonData.forEach((row, idx) => {
       const rowNum = idx + 2; // Excel 行号 = 索引 + 2 (1为表头)
       const qty = row['数量'];
+      const unitPrice = row['估算单价（元）'];
       const price = row['估算总价（元）'];
       if (qty === '' || qty === null || qty === undefined || isNaN(Number(qty))) {
         numErrors.push(`第 ${rowNum} 行"数量"字段异常: "${qty}"`);
+      }
+      if (unitPrice === '' || unitPrice === null || unitPrice === undefined || isNaN(Number(unitPrice)) || Number(unitPrice) <= 0) {
+        numErrors.push(`第 ${rowNum} 行"估算单价（元）"字段异常: "${unitPrice}"`);
       }
       if (price === '' || price === null || price === undefined || isNaN(Number(price))) {
         numErrors.push(`第 ${rowNum} 行"估算总价（元）"字段异常: "${price}"`);

@@ -17,6 +17,7 @@ import {
 const AMOUNT_OUTPUT_SCALE = 2;
 const QTY_OUTPUT_SCALE = 3;
 const ROUNDED_QTY_OUTPUT_SCALE = 0;
+const AMOUNT_TOLERANCE = 1n;
 
 function getNormalizedDecimal(row: ExcelRow, field: string): string {
   return normalizeDecimalString(row[field]) ?? '0';
@@ -24,6 +25,10 @@ function getNormalizedDecimal(row: ExcelRow, field: string): string {
 
 function sumBigInt(values: bigint[]): bigint {
   return values.reduce((sum, value) => sum + value, 0n);
+}
+
+function absBigInt(value: bigint): bigint {
+  return value < 0n ? -value : value;
 }
 
 /**
@@ -65,6 +70,96 @@ function roundAndReconcile(
     }
   }
   return rounded;
+}
+
+function multiplyToScale(
+  left: bigint,
+  leftScale: number,
+  right: bigint,
+  rightScale: number,
+  dstScale: number
+): bigint {
+  const product = left * right;
+  const productScale = leftScale + rightScale;
+  if (dstScale >= productScale) {
+    return product * (10n ** BigInt(dstScale - productScale));
+  }
+  return roundBigIntToScale(product, productScale, dstScale);
+}
+
+function getValidatedUnitPrice(
+  row: ExcelRow,
+  contextLabel: string
+): { normalized: string; value: bigint; scale: number } {
+  const normalized = normalizeDecimalString(row['估算单价（元）']);
+  if (normalized == null) {
+    throw new Error(`${contextLabel}估算单价为空或格式无效，无法执行拆分`);
+  }
+
+  const scale = getDecimalScale(normalized);
+  const value = decimalToBigInt(normalized, scale);
+  if (value <= 0n) {
+    throw new Error(`${contextLabel}估算单价必须大于 0，无法执行拆分`);
+  }
+
+  return { normalized, value, scale };
+}
+
+function assertSourceRowConsistent(
+  rowAmountInt: bigint,
+  amountScale: number,
+  rowQtyInt: bigint,
+  qtyScale: number,
+  unitPriceInt: bigint,
+  unitPriceScale: number,
+  contextLabel: string
+): void {
+  const actualAmount = roundBigIntToScale(rowAmountInt, amountScale, AMOUNT_OUTPUT_SCALE);
+  const expectedAmount = multiplyToScale(
+    rowQtyInt,
+    qtyScale,
+    unitPriceInt,
+    unitPriceScale,
+    AMOUNT_OUTPUT_SCALE
+  );
+
+  if (absBigInt(actualAmount - expectedAmount) > AMOUNT_TOLERANCE) {
+    throw new Error(
+      `${contextLabel}原始行数量、估算单价、估算总价不一致，超出允许的四舍五入误差`
+    );
+  }
+}
+
+function buildPositiveIntegerShares(
+  total: bigint,
+  weights: bigint[],
+  minimum: bigint,
+  fieldLabel: string,
+  contextLabel: string
+): bigint[] {
+  if (total < 0n) {
+    throw new Error(`${contextLabel}${fieldLabel}不能为负数`);
+  }
+  if (total === 0n) {
+    return Array.from({ length: weights.length }, () => 0n);
+  }
+
+  const requiredMinimum = minimum * BigInt(weights.length);
+  if (requiredMinimum > total) {
+    throw new Error(
+      `${contextLabel}${fieldLabel}不足以拆分为 ${weights.length} 个非零结果，请减少分包数量或调整原始数据`
+    );
+  }
+
+  const normalizedWeights = weights.map(value => value > 0n ? value : 0n);
+  const ratioBasis = sumBigInt(normalizedWeights) > 0n
+    ? normalizedWeights
+    : Array.from({ length: weights.length }, () => 1n);
+  const remainder = total - requiredMinimum;
+  const extraShares = remainder > 0n
+    ? splitBigIntByRatio(remainder, ratioBasis)
+    : Array.from({ length: weights.length }, () => 0n);
+  return extraShares.map(value => value + minimum);
 }
 
 function assertRoundedSum(
@@ -213,23 +308,31 @@ export function executeSplit(
     for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
       const row = toSplitRows[rowIdx];
       const isLastRow = rowIdx === toSplitRows.length - 1;
+      const contextLabel = `分标"${fbName}"第${rowIdx + 1}条待拆行：`;
       if (config.splitScope === 'rounded' && getDecimalScale(getNormalizedDecimal(row, '数量')) > 0) {
         throw new Error(`分标"${fbName}"存在小数数量，不能按取整拆分执行`);
       }
       const rowAmountInt = rowAmountsInt[rowIdx];
       const rowQtyInt = rowQtysInt[rowIdx];
+      const { value: unitPriceInt, scale: unitPriceScale } = getValidatedUnitPrice(row, contextLabel);
+      assertSourceRowConsistent(
+        rowAmountInt,
+        amountScale,
+        rowQtyInt,
+        qtyScale,
+        unitPriceInt,
+        unitPriceScale,
+        contextLabel
+      );
 
       let priceShares: bigint[];
-      let qtyShares: bigint[];
 
       if (method === 'average') {
         priceShares = splitAverageBigInt(rowAmountInt, n);
-        qtyShares = splitAverageBigInt(rowQtyInt, n);
       } else if (method === 'ratio' && config.templateId) {
         const tpl = templateMap.get(config.templateId);
         const ratios = tpl?.ratios ?? Array(n).fill(1);
         priceShares = splitBigIntByRatio(rowAmountInt, ratios);
-        qtyShares = splitBigIntByRatio(rowQtyInt, ratios);
       } else if (method === 'fixedAmount' && config.fixedAmounts) {
         const weightScale = Math.max(amountScale, getMaxDecimalScale(config.fixedAmounts));
         const weights = config.fixedAmounts.map(value => decimalToBigInt(value, weightScale));
@@ -237,37 +340,60 @@ export function executeSplit(
           throw new Error(`分标"${fbName}"的参考金额不能全为 0`);
         }
         priceShares = splitBigIntByRatio(rowAmountInt, weights);
-        qtyShares = splitBigIntByRatio(rowQtyInt, weights);
       } else {
         priceShares = splitAverageBigInt(rowAmountInt, n);
-        qtyShares = splitAverageBigInt(rowQtyInt, n);
       }
 
       // 行级是唯一硬约束：每行 round 后必须严格回到原行金额/数量。
       const amtTarget = roundBigIntToScale(rowAmountInt, amountScale, AMOUNT_OUTPUT_SCALE);
       const qtyTarget = roundBigIntToScale(rowQtyInt, qtyScale, qtyOutputScale);
 
+      if (amtTarget > 0n && qtyTarget === 0n) {
+        throw new Error(`${contextLabel}金额大于 0 但数量为 0，无法满足数量与金额一致性`);
+      }
+
       const useFixedAmountRoundedOptimization = Boolean(fixedAmountRoundedTargets && fixedAmountRoundedAllocated);
-      const roundedAmts = useFixedAmountRoundedOptimization
+      const amountWeightBasis = useFixedAmountRoundedOptimization
         ? buildDynamicFixedAmountRowTargets(
             amtTarget,
             fixedAmountRoundedTargets!,
             fixedAmountRoundedAllocated!,
             isLastRow
           )
-        : roundAndReconcile(priceShares, amountScale, AMOUNT_OUTPUT_SCALE, amtTarget);
-      const qtyWeightBasis = useFixedAmountRoundedOptimization
-        ? roundedAmts.map(value => value > 0n ? value : 0n)
-        : null;
-      const optimizedQtyShares = useFixedAmountRoundedOptimization
-        ? splitBigIntByRatio(
-            rowQtyInt,
-            sumBigInt(qtyWeightBasis!) > 0n ? qtyWeightBasis! : fixedAmountRoundedTargets!
+        : priceShares;
+      const initialRoundedAmts = config.splitScope === 'rounded'
+        ? buildPositiveIntegerShares(amtTarget, amountWeightBasis, 1n, '金额', contextLabel)
+        : useFixedAmountRoundedOptimization
+          ? amountWeightBasis
+          : roundAndReconcile(priceShares, amountScale, AMOUNT_OUTPUT_SCALE, amtTarget);
+      const qtyWeightBasis = initialRoundedAmts.map(value => value > 0n ? value : 0n);
+      const roundedQtys = config.splitScope === 'rounded'
+        ? buildPositiveIntegerShares(qtyTarget, qtyWeightBasis, 1n, '数量', contextLabel)
+        : roundAndReconcile(
+            splitBigIntByRatio(
+              rowQtyInt,
+              sumBigInt(qtyWeightBasis) > 0n
+                ? qtyWeightBasis
+                : Array.from({ length: n }, () => 1n)
+            ),
+            qtyScale,
+            qtyOutputScale,
+            qtyTarget
+          );
+      const roundedAmts = config.splitScope === 'rounded'
+        ? roundAndReconcile(
+            roundedQtys.map(value => multiplyToScale(
+              value,
+              qtyOutputScale,
+              unitPriceInt,
+              unitPriceScale,
+              AMOUNT_OUTPUT_SCALE
+            )),
+            AMOUNT_OUTPUT_SCALE,
+            AMOUNT_OUTPUT_SCALE,
+            amtTarget
           )
-        : null;
-      const roundedQtys = useFixedAmountRoundedOptimization
-        ? roundAndReconcile(optimizedQtyShares!, qtyScale, qtyOutputScale, qtyTarget)
-        : roundAndReconcile(qtyShares, qtyScale, qtyOutputScale, qtyTarget);
+        : initialRoundedAmts;
 
       if (useFixedAmountRoundedOptimization) {
         for (let index = 0; index < fixedAmountRoundedAllocated!.length; index++) {
@@ -296,15 +422,22 @@ export function executeSplit(
         amtTarget,
         AMOUNT_OUTPUT_SCALE,
         '金额',
-        `分标"${fbName}"第${rowIdx + 1}条待拆行：`
+        contextLabel
       );
       assertRoundedSum(
         roundedQtys,
         qtyTarget,
         qtyOutputScale,
         '数量',
-        `分标"${fbName}"第${rowIdx + 1}条待拆行：`
+        contextLabel
       );
+
+      if (config.splitScope === 'rounded' && roundedAmts.some(value => value <= 0n)) {
+        throw new Error(`${contextLabel}取整拆分后的金额存在 0 或负数，无法与非零数量保持一致`);
+      }
+      if (config.splitScope === 'rounded' && roundedQtys.some(value => value <= 0n)) {
+        throw new Error(`${contextLabel}取整拆分后的数量存在 0 或负数，请减少分包数量或调整原始数据`);
+      }
 
       for (let i = 0; i < n; i++) {
         const newRow: SplitRow = { ...row };
