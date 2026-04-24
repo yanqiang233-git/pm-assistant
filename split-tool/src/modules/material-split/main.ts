@@ -1,6 +1,6 @@
 import { readAndValidate, readAndValidateBuffer } from './excel/reader';
 import { exportToXlsx, downloadConfigTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
-import { executeSplit, generatePreviewSummary } from './split/engine';
+import { executeSplit, generatePreviewSummary, SplitExecutionError } from './split/engine';
 import {
   loadTemplates, saveTemplates, addTemplate, updateTemplate,
   deleteTemplate, setDefaultTemplate, getDefaultTemplate,
@@ -80,6 +80,7 @@ const btnAddTemplate = $('btnAddTemplate');
 const sectionPreview = $('section-preview');
 const previewStatus = $('previewStatus');
 const btnExecuteSplit = $('btnExecuteSplit');
+const previewErrors = $('previewErrors');
 const previewSummary = $('previewSummary');
 const previewTableHead = $('previewTableHead');
 const previewTableBody = $('previewTableBody');
@@ -118,6 +119,21 @@ const fixedAmountHint = $('fixedAmountHint');
 const fixedAmountInputs = $('fixedAmountInputs');
 const fixedAmountSum = $('fixedAmountSum');
 const fixedAmountTarget = $('fixedAmountTarget');
+
+function showPreviewError(reasons: string | string[], title = '无法执行拆分并预览'): void {
+  const normalizedReasons = Array.isArray(reasons) ? reasons : [reasons];
+  previewErrors.innerHTML = `<h4>${esc(title)}</h4><ul>${normalizedReasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>`;
+  previewErrors.classList.remove('hidden');
+  previewStatus.textContent = '执行失败';
+  previewStatus.className = 'status-badge error';
+  exportStatus.textContent = '待预览';
+  exportStatus.className = 'status-badge';
+}
+
+function clearPreviewError(): void {
+  previewErrors.innerHTML = '';
+  previewErrors.classList.add('hidden');
+}
 const fixedAmountDiff = $('fixedAmountDiff');
 const fixedAmountOk = $('fixedAmountOk');
 const fixedAmountCancel = $('fixedAmountCancel');
@@ -835,6 +851,8 @@ const PREVIEW_PAGE_SIZE = 100;
 let previewPage = 0;
 
 btnExecuteSplit.addEventListener('click', () => {
+  clearPreview();
+
   // Validate all configs ready
   const notReady = state.fenbiaoConfigs.filter(c => {
     if (c.packageCount < 1) return true;
@@ -843,13 +861,17 @@ btnExecuteSplit.addEventListener('click', () => {
     return false;
   });
   if (notReady.length > 0) {
-    alert(`以下标段配置未完成：\n${notReady.map(c => c.name).join('\n')}`);
+    const reason = `以下标段配置未完成：${notReady.map(c => c.name).join('、')}`;
+    showPreviewError(reason, '配置不完整');
+    alert(reason);
     return;
   }
 
   const roundedErrors = collectRoundedScopeErrors(state.importResult!, state.fenbiaoConfigs);
   if (roundedErrors.length > 0) {
-    alert(`以下分标已配置为取整拆分，但数量存在小数：\n${roundedErrors.slice(0, 20).join('\n')}`);
+    const reason = `以下分标已配置为取整拆分，但数量存在小数：${roundedErrors.slice(0, 20).join('、')}`;
+    showPreviewError(reason, '数量口径不匹配');
+    alert(reason);
     return;
   }
 
@@ -859,12 +881,17 @@ btnExecuteSplit.addEventListener('click', () => {
     state.previewSummary = generatePreviewSummary(
       state.importResult!.rows, state.splitResult, state.fenbiaoConfigs
     );
+    clearPreviewError();
     previewPage = 0;
     renderPreview();
     saveStateSnapshot(state);
   } catch (err) {
     clearPreview();
-    alert(`拆分失败: ${err instanceof Error ? err.message : String(err)}`);
+    const reasons = err instanceof SplitExecutionError
+      ? err.reasons
+      : [err instanceof Error ? err.message : String(err)];
+    showPreviewError(reasons);
+    alert(`拆分失败:\n${reasons.join('\n')}`);
   }
 });
 
@@ -924,6 +951,7 @@ function formatPreviewCellValue(row: ExcelRow, field: string): string {
 function clearPreview() {
   state.splitResult = null;
   state.previewSummary = null;
+  clearPreviewError();
   previewSummary.classList.add('hidden');
   previewTableHead.innerHTML = '';
   previewTableBody.innerHTML = '';

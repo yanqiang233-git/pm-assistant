@@ -205,6 +205,9 @@ body {
   padding: 14px 16px; margin-bottom: 14px;
   background: #f0f4ff; border: 1px solid #bfdbfe; border-radius: 6px;
 }
+.module-body > .error-list + .preview-summary {
+  margin-top: 0;
+}
 .preview-summary .summary-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px; font-size: 13px;
