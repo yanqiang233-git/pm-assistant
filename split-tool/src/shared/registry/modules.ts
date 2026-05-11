@@ -37,6 +37,18 @@ export const MODULE_REGISTRY: ModuleRegistryEntry[] = [
     projectSubDir: '上报物资汇总表拆分',
     windowWidth: 1200,
     windowHeight: 900
+  },
+  {
+    id: 'review-score',
+    title: '阅标记录赋分工具',
+    description: '按已确认规则对指定表头的阅标记录进行自动赋分',
+    windowLabel: 'review-score',
+    entryPage: 'modules/review-score/index.html',
+    enabled: true,
+    categories: [],
+    projectSubDir: '阅标记录赋分工具',
+    windowWidth: 1440,
+    windowHeight: 960
   }
 ];
 

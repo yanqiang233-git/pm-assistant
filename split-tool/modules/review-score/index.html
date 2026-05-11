@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>阅标记录赋分工具</title>
+  <link rel="stylesheet" href="/src/modules/review-score/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>阅标记录赋分工具</h1>
+      <p class="subtitle">按已确认的三套规则自动识别、赋分、预览并导出结果</p>
+    </div>
+    <nav class="module-nav">
+      <a href="#section-import">导入</a>
+      <a href="#section-rules">规则</a>
+      <a href="#section-preview">预览</a>
+      <a href="#section-export">导出</a>
+    </nav>
+  </header>
+
+  <main class="app-main">
+    <section id="section-import" class="module">
+      <div class="module-header">
+        <h2>导入文件</h2>
+        <span id="importStatus" class="status-badge">未导入</span>
+      </div>
+      <div class="module-body">
+        <div class="toolbar">
+          <input id="fileInput" type="file" accept=".xlsx,.xls" class="hidden" />
+          <button id="btnImport" class="btn btn-primary">选择 Excel 文件</button>
+          <button id="btnRetry" class="btn hidden">重新识别</button>
+        </div>
+        <div id="importInfo" class="info-card hidden"></div>
+        <div id="importErrors" class="error-list hidden"></div>
+      </div>
+    </section>
+
+    <section id="section-rules" class="module disabled-module">
+      <div class="module-header">
+        <h2>规则识别</h2>
+        <span id="schemaStatus" class="status-badge">待导入</span>
+      </div>
+      <div class="module-body">
+        <div id="schemaSummary" class="info-card hidden"></div>
+        <div id="configPanel" class="config-panel hidden">
+          <div class="config-header">
+            <h3>评分参数</h3>
+            <p>需要采购标准值的规则会在这里补充参数，未填时对应规则不会自动计算。</p>
+          </div>
+          <div id="configFields" class="config-grid"></div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>评分模块</th>
+                <th>评分项</th>
+                <th>取数字段</th>
+                <th>算法摘要</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody id="ruleTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="section-preview" class="module disabled-module">
+      <div class="module-header">
+        <h2>结果预览</h2>
+        <span id="previewStatus" class="status-badge">待计算</span>
+      </div>
+      <div class="module-body">
+        <div class="toolbar">
+          <button id="btnScore" class="btn btn-primary">执行赋分</button>
+        </div>
+        <div class="preview-note">自动规则会直接计算；人工项会在预览表中保留为可编辑输入，当前总分会随之实时更新。</div>
+        <div id="previewSummary" class="info-card hidden"></div>
+        <div id="previewErrors" class="error-list hidden"></div>
+        <div class="table-wrap">
+          <table class="data-table" id="previewTable">
+            <thead id="previewHead"></thead>
+            <tbody id="previewBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="section-export" class="module disabled-module">
+      <div class="module-header">
+        <h2>导出结果</h2>
+        <span id="exportStatus" class="status-badge">待计算</span>
+      </div>
+      <div class="module-body">
+        <div id="exportSummary" class="info-card hidden"></div>
+        <div class="toolbar">
+          <button id="btnExport" class="btn btn-primary">导出评分结果</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/src/modules/review-score/main.ts"></script>
+</body>
+</html>

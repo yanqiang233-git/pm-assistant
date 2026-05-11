@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "tauri": "tauri",
     "check:version": "node scripts/check-version-consistency.mjs",
-    "release:prepare": "node scripts/prepare-windows-release.mjs"
+    "release:prepare": "node scripts/prepare-windows-release.mjs",
+    "extract:scoring": "node scripts/extract-scoring-rules.mjs"
   },
   "dependencies": {
     "@tauri-apps/plugin-dialog": "^2.7.0",

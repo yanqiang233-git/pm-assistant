@@ -11,7 +11,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
-        'material-split': resolve(__dirname, 'modules/material-split/index.html')
+        'material-split': resolve(__dirname, 'modules/material-split/index.html'),
+        'review-score': resolve(__dirname, 'modules/review-score/index.html')
       }
     }
   },
