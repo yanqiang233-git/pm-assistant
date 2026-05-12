@@ -1,4 +1,4 @@
-import { buildExportBuffer, readWorkbookFile } from './excel';
+import { buildExportBuffer, buildScoreOnlyExportBuffer, readWorkbookFile } from './excel';
 import { getSchemaDefinition, scoreWorkbookRows } from './rules';
 import {
   ensureModuleDirs,
@@ -21,6 +21,7 @@ const btnImport = $('btnImport');
 const btnRetry = $('btnRetry');
 const btnScore = $('btnScore');
 const btnExport = $('btnExport');
+const btnExportScoreOnly = $('btnExportScoreOnly');
 
 const importStatus = $('importStatus');
 const schemaStatus = $('schemaStatus');
@@ -74,6 +75,58 @@ function esc(text: string): string {
 function formatScore(score: number | null): string {
   if (score == null) return '--';
   return Number.isInteger(score) ? String(score) : score.toFixed(1);
+}
+
+function parsePreviewDateValue(value: string): Date | null {
+  const raw = value.trim();
+  if (!raw || raw === '/' || raw === '-') return null;
+
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const serial = Number(raw);
+    if (Number.isFinite(serial) && serial > 0) {
+      const utcDays = Math.floor(serial - 25569);
+      const utcValue = utcDays * 86400 * 1000;
+      const date = new Date(utcValue);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+  }
+
+  const normalized = raw
+    .replace(/年/g, '-')
+    .replace(/月/g, '-')
+    .replace(/日/g, '')
+    .replace(/[./]/g, '-')
+    .replace(/\s+/g, '');
+  const match = normalized.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatPreviewDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}年${month}月${day}日`;
+}
+
+function isDateLikeColumn(workbook: ImportedWorkbook, colIndex: number): boolean {
+  const columnLabel = workbook.columns.find((column) => column.colIndex === colIndex)?.label || '';
+  return /(有效期|日期|时间|年月日)/.test(columnLabel);
+}
+
+function formatPreviewRawValue(workbook: ImportedWorkbook, colIndex: number, rawValue: string): string {
+  if (!rawValue) return '';
+  if (!isDateLikeColumn(workbook, colIndex)) return rawValue;
+  const parsedDate = parsePreviewDateValue(rawValue);
+  return parsedDate ? formatPreviewDate(parsedDate) : rawValue;
+}
+
+function scoreColumnLabel(rule: ScoreRule): string {
+  return `${rule.module}-${rule.item}`;
 }
 
 function truncatePreviewText(text: string, limit = 100): string {
@@ -197,24 +250,24 @@ function expandHeaderMatrix(workbook: ImportedWorkbook): string[][] {
   return matrix;
 }
 
+function tryFindWorkbookColumn(candidate: string, workbook: ImportedWorkbook): number {
+  const exactKeyMatch = workbook.columns.find((column) => column.key === candidate);
+  if (exactKeyMatch) return exactKeyMatch.colIndex;
+
+  const exactLabelMatch = workbook.columns.find((column) => column.label === candidate);
+  if (exactLabelMatch) return exactLabelMatch.colIndex;
+
+  if (candidate !== '人工录入' && candidate !== '各省提供' && candidate !== '主观项得分') {
+    const fuzzyMatch = workbook.columns.find((column) => column.label.includes(candidate) || candidate.includes(column.label));
+    if (fuzzyMatch) return fuzzyMatch.colIndex;
+  }
+
+  return -1;
+}
+
 function findRuleAnchorColumn(rule: ScoreRule, workbook: ImportedWorkbook): number {
-  const findCandidateColumn = (candidate: string): number => {
-    const exactKeyMatch = workbook.columns.find((column) => column.key === candidate);
-    if (exactKeyMatch) return exactKeyMatch.colIndex;
-
-    const exactLabelMatch = workbook.columns.find((column) => column.label === candidate);
-    if (exactLabelMatch) return exactLabelMatch.colIndex;
-
-    if (candidate !== '人工录入' && candidate !== '各省提供' && candidate !== '主观项得分') {
-      const fuzzyMatch = workbook.columns.find((column) => column.label.includes(candidate) || candidate.includes(column.label));
-      if (fuzzyMatch) return fuzzyMatch.colIndex;
-    }
-
-    return -1;
-  };
-
   if (rule.sourceFieldKey) {
-    const sourceColumn = findCandidateColumn(rule.sourceFieldKey);
+    const sourceColumn = tryFindWorkbookColumn(rule.sourceFieldKey, workbook);
     if (sourceColumn >= 0) return sourceColumn;
   }
 
@@ -222,7 +275,7 @@ function findRuleAnchorColumn(rule: ScoreRule, workbook: ImportedWorkbook): numb
   let found = -1;
 
   candidates.forEach((candidate) => {
-    const candidateColumn = findCandidateColumn(candidate);
+    const candidateColumn = tryFindWorkbookColumn(candidate, workbook);
     if (candidateColumn >= 0) {
       found = Math.max(found, candidateColumn);
     }
@@ -235,6 +288,51 @@ function buildPlacements(workbook: ImportedWorkbook, schema: SchemaDefinition): 
   return schema.rules
     .map((rule) => ({ rule, afterCol: findRuleAnchorColumn(rule, workbook) }))
     .sort((left, right) => left.afterCol - right.afterCol);
+}
+
+function collectHeaderTextsForColumn(workbook: ImportedWorkbook, colIndex: number): string[] {
+  const headerMatrix = expandHeaderMatrix(workbook);
+  return headerMatrix
+    .map((row) => row[colIndex] || '')
+    .map((value) => value.trim())
+    .filter((value, index, array) => Boolean(value) && array.indexOf(value) === index);
+}
+
+function getOriginalHeaderDescription(rule: ScoreRule, workbook: ImportedWorkbook): string {
+  const columnIndexes = new Set<number>();
+
+  if (rule.sourceFieldKey) {
+    const sourceColumn = tryFindWorkbookColumn(rule.sourceFieldKey, workbook);
+    if (sourceColumn >= 0) {
+      columnIndexes.add(sourceColumn);
+    }
+  }
+
+  rule.fields.forEach((field) => {
+    const columnIndex = tryFindWorkbookColumn(field, workbook);
+    if (columnIndex >= 0) {
+      columnIndexes.add(columnIndex);
+    }
+  });
+
+  const descriptions = Array.from(columnIndexes)
+    .sort((left, right) => left - right)
+    .map((colIndex) => collectHeaderTextsForColumn(workbook, colIndex).slice(0, Math.max(workbook.headerRowCount - 1, 1)).join(' / '))
+    .filter((value, index, array) => Boolean(value) && array.indexOf(value) === index);
+
+  return descriptions.join('；') || rule.fields.join('；') || rule.item;
+}
+
+function getOriginalHeaderDescriptionByLabel(workbook: ImportedWorkbook, label: string, fallback: string): string {
+  const columnIndex = tryFindWorkbookColumn(label, workbook);
+
+  if (columnIndex < 0) return fallback;
+
+  const description = collectHeaderTextsForColumn(workbook, columnIndex)
+    .slice(0, Math.max(workbook.headerRowCount - 1, 1))
+    .join(' / ');
+
+  return description || fallback;
 }
 
 function buildAugmentedHeaderMatrix(workbook: ImportedWorkbook, placements: Placement[]): { matrix: string[][]; scoreColumnIndexes: number[] } {
@@ -369,8 +467,9 @@ function buildPreviewTable(scoredRows: ScoredRow[]): { headHtml: string; bodyHtm
 
     for (let colIndex = 0; colIndex < state.imported!.columnCount; colIndex++) {
       const rawValue = rawValues[colIndex] || '';
-      const title = rawValue ? ` title="${esc(rawValue)}"` : '';
-      cells.push(`<td class="raw-cell"${title}><span class="cell-clip">${esc(truncatePreviewText(rawValue))}</span></td>`);
+      const displayValue = formatPreviewRawValue(state.imported!, colIndex, rawValue);
+      const title = displayValue ? ` title="${esc(displayValue)}"` : '';
+      cells.push(`<td class="raw-cell"${title}><span class="cell-clip">${esc(truncatePreviewText(displayValue))}</span></td>`);
       placements.filter((placement) => placement.afterCol === colIndex).forEach((placement) => {
         cells.push(`<td class="score-col score-body">${getScoreCellMarkup(scoreRow.rowId, placement.rule, scoreRow)}</td>`);
       });
@@ -427,7 +526,7 @@ function scoreAndRender(): void {
   ].join('\n');
 
   exportSummary.classList.remove('hidden');
-  exportSummary.textContent = '评分结果已生成，可直接导出为 Excel。';
+  exportSummary.textContent = '评分结果已生成，可导出“原始数据+得分”或“纯得分”两种 Excel。';
 
   setStatus(previewStatus, '已计算', metrics.pendingAutoCells > 0 ? 'warning' : 'success');
   setStatus(exportStatus, '可导出', 'success');
@@ -453,6 +552,52 @@ function buildExportRows() {
   }));
 
   return { resultSheetData: exportSheetData, ruleRows };
+}
+
+function buildScoreOnlyMatrix(): Array<Array<string | number>> {
+  if (!state.imported || !state.schema) return [];
+  const { rows } = scoreWorkbookRows(state.imported, state.schema, state.configValues, state.manualValues);
+  const sectionDescription = getOriginalHeaderDescriptionByLabel(state.imported, '预审标段', '当前行预审标段');
+  const supplierDescription = getOriginalHeaderDescriptionByLabel(state.imported, '供应商名称', '当前行供应商名称');
+  const creditCodeDescription = getOriginalHeaderDescriptionByLabel(state.imported, '统一社会信用代码', '当前行统一社会信用代码');
+  const headers = [
+    '序号',
+    '原表行号',
+    '预审标段',
+    '供应商名称',
+    '统一社会信用代码',
+    ...state.schema.rules.map((rule) => scoreColumnLabel(rule)),
+    '总分'
+  ];
+
+  const descriptionRow = [
+    '导出序号',
+    '原始 Excel 行号',
+    sectionDescription,
+    supplierDescription,
+    creditCodeDescription,
+    ...state.schema.rules.map((rule) => getOriginalHeaderDescription(rule, state.imported!)),
+    '全部评分项合计'
+  ];
+
+  const dataRows = rows.map((scoreRow, index) => {
+    const exportRow: Array<string | number> = [
+      index + 1,
+      scoreRow.rowNumber,
+      scoreRow.sectionName,
+      scoreRow.supplierName,
+      scoreRow.socialCreditCode
+    ];
+
+    state.schema!.rules.forEach((rule) => {
+      exportRow.push(scoreRow.cells[rule.key].score ?? '');
+    });
+
+    exportRow.push(scoreRow.currentTotal);
+    return exportRow;
+  });
+
+  return [headers, descriptionRow, ...dataRows];
 }
 
 async function handleImport(file: File): Promise<void> {
@@ -542,6 +687,24 @@ btnExport.addEventListener('click', async () => {
   }
 
   const buffer = buildExportBuffer(resultSheetData, ruleRows);
-  await saveToFile(buffer, `${state.schema.name}_评分结果.xlsx`);
+  await saveToFile(buffer, `${state.schema.name}_原始数据+得分.xlsx`);
   await mirrorExportResult(buffer);
+});
+
+btnExportScoreOnly.addEventListener('click', async () => {
+  if (!state.imported || !state.schema) {
+    previewErrors.classList.remove('hidden');
+    previewErrors.textContent = '请先完成导入和赋分。';
+    return;
+  }
+
+  const matrix = buildScoreOnlyMatrix();
+  if (matrix.length <= 2) {
+    previewErrors.classList.remove('hidden');
+    previewErrors.textContent = '当前没有可导出的评分结果。';
+    return;
+  }
+
+  const buffer = buildScoreOnlyExportBuffer(matrix);
+  await saveToFile(buffer, `${state.schema.name}_纯得分.xlsx`);
 });

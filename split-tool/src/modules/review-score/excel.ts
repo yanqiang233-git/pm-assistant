@@ -27,6 +27,20 @@ function normalizeMerges(sheet: XLSX.WorkSheet): MergeRange[] {
   }));
 }
 
+function expandMergedCells(matrix: string[][], merges: MergeRange[]): string[][] {
+  const expanded = matrix.map((row) => [...row]);
+  merges.forEach((merge) => {
+    const sourceValue = expanded[merge.startRow]?.[merge.startCol] ?? '';
+    for (let rowIndex = merge.startRow; rowIndex <= merge.endRow; rowIndex++) {
+      for (let colIndex = merge.startCol; colIndex <= merge.endCol; colIndex++) {
+        if (!expanded[rowIndex]) continue;
+        expanded[rowIndex][colIndex] = sourceValue;
+      }
+    }
+  });
+  return expanded;
+}
+
 function uniqueColumns(headerRow: unknown[]): ColumnDef[] {
   const counts = new Map<string, number>();
   return headerRow.map((rawLabel, colIndex) => {
@@ -74,6 +88,7 @@ export function parseWorkbook(data: Uint8Array, fileName: string): ImportedWorkb
     defval: ''
   }));
   const merges = normalizeMerges(sheet);
+  const expandedMatrix = expandMergedCells(rawMatrix, merges);
 
   if (rawMatrix.length <= DATA_START_ROW_INDEX) {
     throw new Error('表格内容不足，无法读取评分数据');
@@ -85,11 +100,12 @@ export function parseWorkbook(data: Uint8Array, fileName: string): ImportedWorkb
 
   for (let rowIndex = DATA_START_ROW_INDEX; rowIndex < rawMatrix.length; rowIndex++) {
     const rawRow = rawMatrix[rowIndex] || [];
-    if (!rowHasContent(rawRow)) continue;
+    const expandedRow = expandedMatrix[rowIndex] || [];
+    if (!rowHasContent(expandedRow)) continue;
 
     const values: Record<string, string> = {};
     columns.forEach((column) => {
-      values[column.key] = normalizeText(rawRow[column.colIndex]);
+      values[column.key] = normalizeText(expandedRow[column.colIndex]);
     });
 
     rows.push({
@@ -199,5 +215,17 @@ export function buildExportBuffer(resultSheetData: ExportSheetData, ruleRows: Ar
   XLSX.utils.book_append_sheet(workbook, resultSheet, resultSheetData.sheetName || '评分结果');
   XLSX.utils.book_append_sheet(workbook, ruleSheet, '规则说明');
   const arrayBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array', cellStyles: true }) as ArrayBuffer;
+  return new Uint8Array(arrayBuffer);
+}
+
+export function buildScoreOnlyExportBuffer(matrix: Array<Array<string | number>>, sheetName = '纯得分'): Uint8Array {
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet(matrix);
+  const headers = matrix[0] || [];
+  sheet['!cols'] = headers.map((header) => ({
+    wch: /得分|总分/.test(String(header)) ? 14 : 20
+  }));
+  XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
+  const arrayBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
   return new Uint8Array(arrayBuffer);
 }

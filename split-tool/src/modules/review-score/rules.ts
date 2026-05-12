@@ -16,6 +16,18 @@ function normalizeValue(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizeSectionName(value: string): string {
+  return value.replace(/\s+/g, '');
+}
+
+function isHighVoltageBranchBox(sectionName: string): boolean {
+  return normalizeSectionName(sectionName).includes('高压电缆分支箱');
+}
+
+function isLowVoltageBranchBox(sectionName: string): boolean {
+  return normalizeSectionName(sectionName).includes('低压电缆分支箱');
+}
+
 function parseNumber(value: string): number | null {
   if (!value) return null;
   const normalized = value.replace(/,/g, '').replace(/%/g, '').trim();
@@ -106,6 +118,26 @@ function performanceRule(base: number, sourceFieldKey = '既有业绩汇总'): S
       if (actual >= base * 2) return { score: 16 };
       if (actual >= base * 1.5) return { score: 13 };
       if (actual >= base) return { score: 10 };
+      return { score: 0 };
+    }
+  };
+}
+
+function transformerInnovationStandardRule(): ScoreRule {
+  return {
+    key: 'innovation-standard',
+    module: '资源实力',
+    item: '创新能力-标准',
+    fields: ['企业参与制定与投标产品相关的行业及以上标准数量', '企业参与制定与投标产品相关的团标标准数量', '企业参与制定与投标产品相关的企标标准数量'],
+    algorithm: '行业及以上数量大于 0 得 4 分；否则若团标或企标数量大于 0 得 2 分；否则 0 分。',
+    mode: 'auto',
+    sourceFieldKey: '【后加】标准总和',
+    score: (helper) => {
+      const industry = helper.getNumber('行业及以上标准数量') ?? helper.getNumber('企业参与制定与投标产品相关的行业及以上标准数量') ?? 0;
+      const group = helper.getNumber('团标标准数量') ?? helper.getNumber('企业参与制定与投标产品相关的团标标准数量') ?? 0;
+      const enterprise = helper.getNumber('企标标准数量') ?? helper.getNumber('企业参与制定与投标产品相关的企标标准数量') ?? 0;
+      if (industry > 0) return { score: 4 };
+      if (group > 0 || enterprise > 0) return { score: 2 };
       return { score: 0 };
     }
   };
@@ -264,8 +296,8 @@ function buildRuleHelper(row: ImportedRow, workbook: ImportedWorkbook, configVal
 }
 
 function getSectionBase(sectionName: string): number {
-  if (sectionName.includes('高压电缆分支箱')) return 80;
-  if (sectionName.includes('低压电缆分支箱')) return 1000;
+  if (isHighVoltageBranchBox(sectionName)) return 80;
+  if (isLowVoltageBranchBox(sectionName)) return 1000;
   return 1000;
 }
 
@@ -362,14 +394,14 @@ function standardScoreRules(): ScoreRule[] {
       key: 'green-management-energy',
       module: '高质量发展评价',
       item: '能源管理体系认证证书',
-      fields: ['能源管理体系证书', '能源管理体系认证证书', '国家级能源管理体系认证证书-有效期至', '绿色体系认证-国家级能源管理体系认证证书（有/无）'],
+      fields: ['能源管理体系证书', '能源管理体系认证证书', '国家级能源管理体系认证证书-有效期至', '能源管理体系认证证书-有效期至', '能源管理体系证书-有效期至', '绿色体系认证-国家级能源管理体系认证证书（有/无）'],
       algorithm: '能源管理体系证书有效期在 2026-05-19 及以后得 2 分，否则 0 分。',
       mode: 'auto',
-      sourceFieldKey: '国家级能源管理体系认证证书-有效期至',
+      sourceFieldKey: '职业健康安全管理体系认证证书-有效期至',
       score: (helper) => ({
         score: isCertificateValidOnOrAfter(
           helper,
-          ['国家级能源管理体系认证证书-有效期至'],
+          ['国家级能源管理体系认证证书-有效期至', '能源管理体系认证证书-有效期至', '能源管理体系证书-有效期至'],
           ['绿色体系认证-国家级能源管理体系认证证书（有/无）', '能源管理体系认证证书', '能源管理体系证书']
         ) ? 2 : 0
       })
@@ -477,7 +509,8 @@ const transformerSchema: SchemaDefinition = {
   configFields: transformerConfigFields,
   rules: [
     performanceRule(150, '既有业绩汇总(2022-2024）单位：台'),
-    ...standardScoreRules().slice(0, 3),
+    transformerInnovationStandardRule(),
+    ...standardScoreRules().slice(1, 3),
     {
       key: 'transformer-load-loss',
       module: '资源实力',
@@ -724,7 +757,7 @@ const branchBoxSchema: SchemaDefinition = {
       algorithm: '高压电缆分支箱固定 4 分；低压电缆分支箱（塑壳断路器）按两列分别算分后取高分。',
       mode: 'auto',
       score: (helper) => {
-        if (helper.sectionName.includes('高压电缆分支箱')) return { score: 4 };
+        if (isHighVoltageBranchBox(helper.sectionName)) return { score: 4 };
         const metal = helper.getNumber('金属外壳操作手柄温升');
         const insulation = helper.getNumber('绝缘材料操作手柄温升');
         const metalScore = metal == null ? 0 : metal <= 10 ? 4 : metal <= 15 ? 1 : 0;
