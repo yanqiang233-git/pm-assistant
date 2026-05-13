@@ -10,6 +10,7 @@ export function createInitialState(): AppState {
     fenbiaoConfigs: [],
     globalSplitMethod: 'average',
     splitResult: null,
+    splitWarnings: [],
     previewSummary: null
   };
 }

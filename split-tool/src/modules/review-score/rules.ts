@@ -21,11 +21,15 @@ function normalizeSectionName(value: string): string {
 }
 
 function isHighVoltageBranchBox(sectionName: string): boolean {
-  return normalizeSectionName(sectionName).includes('高压电缆分支箱');
+  const normalized = normalizeSectionName(sectionName);
+  return normalized.includes('高压电缆分支箱')
+    || (normalized.includes('高压') && normalized.includes('电缆分支箱'));
 }
 
 function isLowVoltageBranchBox(sectionName: string): boolean {
-  return normalizeSectionName(sectionName).includes('低压电缆分支箱');
+  const normalized = normalizeSectionName(sectionName);
+  return normalized.includes('低压电缆分支箱')
+    || (normalized.includes('低压') && normalized.includes('电缆分支箱'));
 }
 
 function parseNumber(value: string): number | null {
@@ -80,6 +84,16 @@ function isCertificateValidOnOrAfter(helper: RuleHelper, dateLabels: string[], f
     if (date && date >= threshold) return true;
   }
   return fallbackLabels.some((label) => helper.getBoolean(label) === true);
+}
+function hasCertificateDateOrFallback(helper: RuleHelper, dateLabels: string[], fallbackLabels: string[] = []): boolean {
+  for (const label of dateLabels) {
+    if (parseDateValue(helper.getText(label))) return true;
+  }
+  return fallbackLabels.some((label) => {
+    const boolValue = helper.getBoolean(label);
+    if (boolValue === true) return true;
+    return boolValue === null && helper.getText(label).trim().length > 0;
+  });
 }
 
 function sumNumbers(values: Array<number | null>): number {
@@ -395,11 +409,11 @@ function standardScoreRules(): ScoreRule[] {
       module: '高质量发展评价',
       item: '能源管理体系认证证书',
       fields: ['能源管理体系证书', '能源管理体系认证证书', '国家级能源管理体系认证证书-有效期至', '能源管理体系认证证书-有效期至', '能源管理体系证书-有效期至', '绿色体系认证-国家级能源管理体系认证证书（有/无）'],
-      algorithm: '能源管理体系证书有效期在 2026-05-19 及以后得 2 分，否则 0 分。',
+      algorithm: '能源管理体系证书相关字段中有有效日期即视为有证书，得 2 分，否则 0 分。',
       mode: 'auto',
-      sourceFieldKey: '职业健康安全管理体系认证证书-有效期至',
+      sourceFieldKey: '国家级能源管理体系认证证书-有效期至',
       score: (helper) => ({
-        score: isCertificateValidOnOrAfter(
+        score: hasCertificateDateOrFallback(
           helper,
           ['国家级能源管理体系认证证书-有效期至', '能源管理体系认证证书-有效期至', '能源管理体系证书-有效期至'],
           ['绿色体系认证-国家级能源管理体系认证证书（有/无）', '能源管理体系认证证书', '能源管理体系证书']
@@ -411,22 +425,22 @@ function standardScoreRules(): ScoreRule[] {
       module: '高质量发展评价',
       item: '质量/职业健康安全/环境管理体系认证证书',
       fields: ['质量管理体系认证证书', '质量管理体系认证证书-有效期至', '绿色体系认证-质量管理体系认证证书（有/无）', '职业健康安全管理体系认证证书', '职业健康安全管理体系认证证书-有效期至', '绿色体系认证-职业健康安全管理体系认证证书（有/无）', '环境管理体系认证证书', '环境管理体系认证证书-有效期至', '绿色体系认证-环境管理体系认证证书（有/无）'],
-      algorithm: '三体系按有效证书数量取 3/2/1/0 分。',
+      algorithm: '三体系各字段中有有效日期即视为有该项证书，按证书数量取 3/2/1/0 分。',
       mode: 'auto',
-      sourceFieldKey: '环境管理体系认证证书-有效期至',
+      sourceFieldKey: '职业健康安全管理体系认证证书-有效期至',
       score: (helper) => {
         const qualityCount = [
-          isCertificateValidOnOrAfter(
+          hasCertificateDateOrFallback(
             helper,
             ['质量管理体系认证证书-有效期至'],
             ['绿色体系认证-质量管理体系认证证书（有/无）', '质量管理体系认证证书']
           ),
-          isCertificateValidOnOrAfter(
+          hasCertificateDateOrFallback(
             helper,
             ['职业健康安全管理体系认证证书-有效期至'],
             ['绿色体系认证-职业健康安全管理体系认证证书（有/无）', '职业健康安全管理体系认证证书']
           ),
-          isCertificateValidOnOrAfter(
+          hasCertificateDateOrFallback(
             helper,
             ['环境管理体系认证证书-有效期至'],
             ['绿色体系认证-环境管理体系认证证书（有/无）', '环境管理体系认证证书']
@@ -757,7 +771,8 @@ const branchBoxSchema: SchemaDefinition = {
       algorithm: '高压电缆分支箱固定 4 分；低压电缆分支箱（塑壳断路器）按两列分别算分后取高分。',
       mode: 'auto',
       score: (helper) => {
-        if (isHighVoltageBranchBox(helper.sectionName)) return { score: 4 };
+        const currentSectionName = helper.getText('预审标段') || helper.sectionName;
+        if (isHighVoltageBranchBox(currentSectionName)) return { score: 4 };
         const metal = helper.getNumber('金属外壳操作手柄温升');
         const insulation = helper.getNumber('绝缘材料操作手柄温升');
         const metalScore = metal == null ? 0 : metal <= 10 ? 4 : metal <= 15 ? 1 : 0;

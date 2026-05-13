@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
-import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate, SplitScope } from '../types';
+import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate, SplitScope, REQUIRED_FIELDS } from '../types';
 import {
   bigIntToDecimalString,
   compareDecimalStrings,
@@ -240,6 +240,17 @@ async function saveToFile(data: Uint8Array, filename: string): Promise<void> {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, 100);
+}
+
+export async function downloadSourceTemplate(): Promise<Uint8Array> {
+  const ws = XLSX.utils.aoa_to_sheet([Array.from(REQUIRED_FIELDS)]);
+  ws['!cols'] = Array.from(REQUIRED_FIELDS, () => ({ wch: 18 }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '上报物资汇总表');
+  const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+  const data = await applyDisplayedPrecisionToWorkbook(rawData);
+  await saveToFile(data, '上报物资汇总表模板.xlsx');
+  return data;
 }
 
 const AMOUNT_TEXT_EXPORT_FIELDS = new Set(['估算总价（元）', '估算单价（元）']);

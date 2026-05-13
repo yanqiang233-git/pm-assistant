@@ -1,5 +1,5 @@
 import {
-  ExcelRow, SplitRow, FenbiaoConfig, SplitMethod,
+  ExcelRow, SplitRow, FenbiaoConfig, SplitExecutionResult, SplitMethod,
   RatioTemplate, PreviewSummary, PKG_NAME_PATTERN
 } from '../types';
 import {
@@ -31,6 +31,16 @@ function absBigInt(value: bigint): bigint {
   return value < 0n ? -value : value;
 }
 
+function isStrictlyDescendingBigInt(values: bigint[], indices?: number[]): boolean {
+  const orderedIndices = indices ?? Array.from({ length: values.length }, (_, index) => index);
+  for (let index = 0; index < orderedIndices.length - 1; index++) {
+    if (values[orderedIndices[index]] <= values[orderedIndices[index + 1]]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * 将 BigInt 值从 srcScale 四舍五入到 dstScale（dstScale ≤ srcScale）
  * 返回在 dstScale 下的 BigInt
@@ -55,21 +65,40 @@ function roundAndReconcile(
   targetInDstScale: bigint
 ): bigint[] {
   const rounded = values.map(v => roundBigIntToScale(v, srcScale, dstScale));
-  let diff = targetInDstScale - sumBigInt(rounded);
-  if (diff > 0n) {
-    // 需要增加 → 从包号小的开始加（包号小者金额更大）
-    for (let i = 0; diff > 0n && i < rounded.length; i++) {
-      rounded[i] += 1n;
-      diff -= 1n;
+  const increaseOrder = Array.from({ length: rounded.length }, (_, index) => index);
+  const decreaseOrder = Array.from({ length: rounded.length }, (_, index) => rounded.length - 1 - index);
+  return reconcileIntegerValues(rounded, targetInDstScale, increaseOrder, decreaseOrder);
+}
+
+function reconcileIntegerValues(
+  values: bigint[],
+  target: bigint,
+  increaseOrder: number[],
+  decreaseOrder: number[],
+  minimumValue = 0n
+): bigint[] {
+  const adjusted = values.slice();
+  let diff = target - sumBigInt(adjusted);
+  while (diff !== 0n) {
+    const increase = diff > 0n;
+    const order = increase ? increaseOrder : decreaseOrder;
+    let moved = false;
+
+    for (const index of order) {
+      const nextValue = adjusted[index] + (increase ? 1n : -1n);
+      if (!increase && nextValue < minimumValue) continue;
+      adjusted[index] = nextValue;
+      diff += increase ? -1n : 1n;
+      moved = true;
+      if (diff === 0n) break;
     }
-  } else if (diff < 0n) {
-    // 需要减少 → 从包号大的开始减（包号小者金额更大）
-    for (let i = rounded.length - 1; diff < 0n && i >= 0; i--) {
-      rounded[i] -= 1n;
-      diff += 1n;
+
+    if (!moved) {
+      throw new Error('无法在当前约束下完成整数回补');
     }
   }
-  return rounded;
+
+  return adjusted;
 }
 
 function multiplyToScale(
@@ -364,6 +393,255 @@ interface FixedAmountRoundedRowPlan extends FixedAmountRoundedRowInput {
   amountShares: bigint[];
 }
 
+interface GeneratedRowPlan {
+  row: ExcelRow;
+  contextLabel: string;
+  amtTarget: bigint;
+  qtyTarget: bigint;
+  unitPriceInt: bigint;
+  unitPriceScale: number;
+  qtyShares: bigint[];
+  amountShares: bigint[];
+}
+
+function materializeGeneratedRowPlans(
+  rowPlans: GeneratedRowPlan[],
+  qtyOutputScale: number
+): SplitRow[] {
+  const splitRows: SplitRow[] = [];
+
+  for (const rowPlan of rowPlans) {
+    for (let index = 0; index < rowPlan.qtyShares.length; index++) {
+      const newRow: SplitRow = { ...rowPlan.row };
+      newRow['分包名称'] = `包${index + 1}`;
+      newRow['分包编号'] = `JS${(index + 1) * 100}`;
+      newRow['估算总价（元）'] = bigIntToDecimalString(rowPlan.amountShares[index], AMOUNT_OUTPUT_SCALE);
+      newRow['数量'] = bigIntToDecimalString(rowPlan.qtyShares[index], qtyOutputScale);
+      splitRows.push(newRow);
+    }
+  }
+
+  return splitRows;
+}
+
+function buildEqualRatioPackageGroups(
+  config: FenbiaoConfig,
+  templateMap: Map<string, RatioTemplate>
+): number[][] {
+  if (config.packageCount <= 1) return [];
+
+  if (config.splitMethod === 'average') {
+    return [Array.from({ length: config.packageCount }, (_, index) => index)];
+  }
+
+  if (config.splitMethod !== 'ratio' || !config.templateId) return [];
+
+  const template = templateMap.get(config.templateId);
+  if (!template) return [];
+
+  const sortedRatios = [...template.ratios].sort((left, right) => right - left);
+  const groups: number[][] = [];
+  let currentGroup: number[] = [0];
+
+  for (let index = 1; index < Math.min(sortedRatios.length, config.packageCount); index++) {
+    if (sortedRatios[index] === sortedRatios[index - 1]) {
+      currentGroup.push(index);
+      continue;
+    }
+    if (currentGroup.length > 1) groups.push(currentGroup);
+    currentGroup = [index];
+  }
+
+  if (currentGroup.length > 1) groups.push(currentGroup);
+  return groups;
+}
+
+function getMicroAdjustmentSteps(qtyOutputScale: number, maxTransfer: bigint): bigint[] {
+  if (maxTransfer <= 0n) return [];
+  if (qtyOutputScale === 0) return [1n];
+
+  const upperBound = maxTransfer > 5000n ? 5000n : maxTransfer;
+  const steps: bigint[] = [];
+
+  for (let delta = 1n; delta <= upperBound; delta += 1n) {
+    if (delta <= 100n) {
+      steps.push(delta);
+      continue;
+    }
+    if (delta <= 1000n) {
+      if (delta % 10n === 0n) steps.push(delta);
+      continue;
+    }
+    if (delta % 50n === 0n) steps.push(delta);
+  }
+
+  if (steps[steps.length - 1] !== upperBound) {
+    steps.push(upperBound);
+  }
+
+  return steps;
+}
+
+function buildAdjustmentPriorityOrder(length: number, primary: number, secondary: number, reverse = false): number[] {
+  const ordered: number[] = [primary, secondary].filter((value, index, array) => array.indexOf(value) === index);
+  const rest = Array.from({ length }, (_, index) => index).filter(index => !ordered.includes(index));
+  if (reverse) rest.reverse();
+  return [...ordered, ...rest];
+}
+
+function rebuildAmountSharesFromQtyShares(
+  rowPlan: GeneratedRowPlan,
+  qtyShares: bigint[],
+  qtyOutputScale: number,
+  favoredIndex: number,
+  constrainedIndex: number
+): bigint[] {
+  const amountCandidates = qtyShares.map(value => multiplyToScale(
+    value,
+    qtyOutputScale,
+    rowPlan.unitPriceInt,
+    rowPlan.unitPriceScale,
+    AMOUNT_OUTPUT_SCALE
+  ));
+
+  return reconcileIntegerValues(
+    amountCandidates,
+    rowPlan.amtTarget,
+    buildAdjustmentPriorityOrder(amountCandidates.length, favoredIndex, constrainedIndex),
+    buildAdjustmentPriorityOrder(amountCandidates.length, constrainedIndex, favoredIndex, true)
+  );
+}
+
+function tryMicroAdjustPair(
+  rowPlans: GeneratedRowPlan[],
+  packageAmounts: bigint[],
+  leftIndex: number,
+  rightIndex: number,
+  qtyOutputScale: number
+): boolean {
+  let bestCandidate: {
+    rowPlan: GeneratedRowPlan;
+    delta: bigint;
+    nextQtyShares: bigint[];
+    nextAmountShares: bigint[];
+    nextGap: bigint;
+    gapGain: bigint;
+  } | null = null;
+
+  for (const rowPlan of rowPlans) {
+    const maxTransfer = rowPlan.qtyShares[rightIndex] - 1n;
+    if (maxTransfer <= 0n) continue;
+
+    const deltas = getMicroAdjustmentSteps(qtyOutputScale, maxTransfer);
+    for (const delta of deltas) {
+      if (rowPlan.qtyShares[rightIndex] <= delta) continue;
+
+      const nextQtyShares = rowPlan.qtyShares.slice();
+      nextQtyShares[leftIndex] += delta;
+      nextQtyShares[rightIndex] -= delta;
+
+      if (nextQtyShares[leftIndex] <= 0n || nextQtyShares[rightIndex] <= 0n) continue;
+
+      const nextAmountShares = rebuildAmountSharesFromQtyShares(
+        rowPlan,
+        nextQtyShares,
+        qtyOutputScale,
+        leftIndex,
+        rightIndex
+      );
+
+      const leftDelta = nextAmountShares[leftIndex] - rowPlan.amountShares[leftIndex];
+      const rightDelta = nextAmountShares[rightIndex] - rowPlan.amountShares[rightIndex];
+      const currentGap = packageAmounts[leftIndex] - packageAmounts[rightIndex];
+      const nextGap = (packageAmounts[leftIndex] + leftDelta) - (packageAmounts[rightIndex] + rightDelta);
+      if (nextGap <= currentGap) continue;
+
+      const gapGain = nextGap - currentGap;
+      if (
+        !bestCandidate
+        || delta < bestCandidate.delta
+        || (delta === bestCandidate.delta && gapGain > bestCandidate.gapGain)
+        || (delta === bestCandidate.delta && gapGain === bestCandidate.gapGain && nextGap > bestCandidate.nextGap)
+      ) {
+        bestCandidate = {
+          rowPlan,
+          delta,
+          nextQtyShares,
+          nextAmountShares,
+          nextGap,
+          gapGain
+        };
+      }
+
+      break;
+    }
+  }
+
+  if (!bestCandidate) return false;
+
+  const previousAmountShares = bestCandidate.rowPlan.amountShares.slice();
+  bestCandidate.rowPlan.qtyShares = bestCandidate.nextQtyShares;
+  bestCandidate.rowPlan.amountShares = bestCandidate.nextAmountShares;
+  packageAmounts[leftIndex] = packageAmounts[leftIndex]
+    - previousAmountShares[leftIndex]
+    + bestCandidate.nextAmountShares[leftIndex];
+  packageAmounts[rightIndex] = packageAmounts[rightIndex]
+    - previousAmountShares[rightIndex]
+    + bestCandidate.nextAmountShares[rightIndex];
+
+  for (let index = 0; index < packageAmounts.length; index++) {
+    if (index === leftIndex || index === rightIndex) continue;
+    packageAmounts[index] = packageAmounts[index]
+      - previousAmountShares[index]
+      + bestCandidate.nextAmountShares[index];
+  }
+
+  return true;
+}
+
+function applyFenbiaoGroupMicroAdjustments(
+  fbName: string,
+  rowPlans: GeneratedRowPlan[],
+  packageAmounts: bigint[],
+  packageGroups: number[][],
+  qtyOutputScale: number
+): string[] {
+  const warnings: string[] = [];
+
+  for (const group of packageGroups) {
+    let guard = 0;
+    let groupAdjustable = true;
+
+    while (!isStrictlyDescendingBigInt(packageAmounts, group) && guard < 2000) {
+      guard += 1;
+      let adjusted = false;
+
+      for (let index = 0; index < group.length - 1; index++) {
+        const leftIndex = group[index];
+        const rightIndex = group[index + 1];
+        if (packageAmounts[leftIndex] > packageAmounts[rightIndex]) continue;
+        if (!tryMicroAdjustPair(rowPlans, packageAmounts, leftIndex, rightIndex, qtyOutputScale)) {
+          groupAdjustable = false;
+          break;
+        }
+        adjusted = true;
+        break;
+      }
+
+      if (!groupAdjustable) break;
+      if (!adjusted) break;
+    }
+
+    if (!groupAdjustable || !isStrictlyDescendingBigInt(packageAmounts, group)) {
+      warnings.push(
+        `分标"${fbName}"中相同比例包组（${group.map(index => `包${index + 1}`).join('、')}）无法在保持各拆分数量大于0的前提下严格微调为小号包金额大于大号包，已保留当前拆分结果。`
+      );
+    }
+  }
+
+  return warnings;
+}
+
 function getPackagePriorityIndices(
   packageAmounts: bigint[],
   packageTargets: bigint[],
@@ -554,6 +832,8 @@ function materializeFixedAmountRoundedRowPlans(
   }
 
   return splitRows;
+
+  return splitRows;
 }
 
 export class SplitExecutionError extends Error {
@@ -578,11 +858,12 @@ export function executeSplit(
   rows: ExcelRow[],
   configs: FenbiaoConfig[],
   templates: RatioTemplate[]
-): SplitRow[] {
+): SplitExecutionResult {
   const configMap = new Map(configs.map(c => [c.name, c]));
   const templateMap = new Map(templates.map(t => [t.id, t]));
   const result: SplitRow[] = [];
   const executionErrors: string[] = [];
+  const executionWarnings: string[] = [];
 
   // 按分标名称分组，保留出现顺序
   const fenbiaoOrder: string[] = [];
@@ -769,6 +1050,7 @@ export function executeSplit(
     const fixedAmountRoundedAllocated = fixedAmountRoundedTargets
       ? preAllocatedByPackage.slice()
       : null;
+    const generatedRowPlans: GeneratedRowPlan[] = [];
 
     for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
       try {
@@ -926,17 +1208,42 @@ export function executeSplit(
           throw new Error(`${contextLabel}取整拆分后的数量存在 0 或负数，请减少分包数量或调整原始数据`);
         }
 
-        for (let i = 0; i < n; i++) {
-          const newRow: SplitRow = { ...row };
-          newRow['分包名称'] = `包${i + 1}`;
-          newRow['分包编号'] = `JS${(i + 1) * 100}`;
-          newRow['估算总价（元）'] = bigIntToDecimalString(roundedAmts[i], AMOUNT_OUTPUT_SCALE);
-          newRow['数量'] = bigIntToDecimalString(roundedQtys[i], qtyOutputScale);
-          result.push(newRow);
-        }
+        generatedRowPlans.push({
+          row,
+          contextLabel,
+          amtTarget,
+          qtyTarget,
+          unitPriceInt,
+          unitPriceScale,
+          qtyShares: roundedQtys,
+          amountShares: roundedAmts
+        });
       } catch (error) {
         executionErrors.push(error instanceof Error ? error.message : String(error));
       }
+    }
+
+    if (generatedRowPlans.length > 0) {
+      if (method === 'average' || method === 'ratio') {
+        const packageAmounts = preAllocatedByPackage.slice();
+        generatedRowPlans.forEach((rowPlan) => {
+          rowPlan.amountShares.forEach((value, index) => {
+            packageAmounts[index] += value;
+          });
+        });
+        const packageGroups = buildEqualRatioPackageGroups(config, templateMap);
+        executionWarnings.push(
+          ...applyFenbiaoGroupMicroAdjustments(
+            fbName,
+            generatedRowPlans,
+            packageAmounts,
+            packageGroups,
+            qtyOutputScale
+          )
+        );
+      }
+
+      result.push(...materializeGeneratedRowPlans(generatedRowPlans, qtyOutputScale));
     }
   }
 
@@ -944,7 +1251,7 @@ export function executeSplit(
     throw new SplitExecutionError(executionErrors);
   }
 
-  return result;
+  return { rows: result, warnings: executionWarnings };
 }
 
 /** 生成预览摘要 */

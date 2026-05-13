@@ -1,5 +1,5 @@
 import { readAndValidate, readAndValidateBuffer } from './excel/reader';
-import { exportToXlsx, exportPackageComparisonToXlsx, downloadConfigTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
+import { exportToXlsx, exportPackageComparisonToXlsx, downloadConfigTemplate, downloadSourceTemplate, readConfigTemplate, downloadSplitConfigTemplate, readSplitConfigTemplate } from './excel/writer';
 import { executeSplit, generatePreviewSummary, SplitExecutionError } from './split/engine';
 import {
   loadTemplates, saveTemplates, addTemplate, updateTemplate,
@@ -45,6 +45,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 
 const fileInput = $<HTMLInputElement>('fileInput');
 const btnImport = $('btnImport');
+const btnDownloadSourceTpl = $('btnDownloadSourceTpl');
 const importStatus = $('importStatus');
 const importInfo = $('importInfo');
 const importErrors = $('importErrors');
@@ -142,6 +143,10 @@ const fixedAmountClose = $('fixedAmountClose');
 
 // ============ Import ============
 btnImport.addEventListener('click', () => fileInput.click());
+btnDownloadSourceTpl.addEventListener('click', async () => {
+  await downloadSourceTemplate();
+});
+
 fileInput.addEventListener('change', async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
@@ -878,7 +883,9 @@ btnExecuteSplit.addEventListener('click', () => {
 
   try {
     const templates = loadTemplates();
-    state.splitResult = executeSplit(state.importResult!.rows, state.fenbiaoConfigs, templates);
+    const executionResult = executeSplit(state.importResult!.rows, state.fenbiaoConfigs, templates);
+    state.splitResult = executionResult.rows;
+    state.splitWarnings = executionResult.warnings;
     state.previewSummary = generatePreviewSummary(
       state.importResult!.rows, state.splitResult, state.fenbiaoConfigs
     );
@@ -899,9 +906,12 @@ btnExecuteSplit.addEventListener('click', () => {
 function renderPreview() {
   if (!state.splitResult || !state.previewSummary) return;
   const summary = state.previewSummary;
+  const warningHtml = state.splitWarnings.length > 0
+    ? `<div class="split-warning-block">${state.splitWarnings.map(message => `<div>• ${esc(message)}</div>`).join('')}</div>`
+    : '';
 
   // Summary
-  previewSummary.innerHTML = `<div class="summary-grid">
+  previewSummary.innerHTML = `${warningHtml}<div class="summary-grid">
     <div>原始行数: <strong>${summary.originalRows}</strong></div>
     <div>拆分后行数: <strong>${summary.splitRows}</strong></div>
     <div>总标段数: <strong>${summary.totalFenbiao}</strong></div>
@@ -951,6 +961,7 @@ function formatPreviewCellValue(row: ExcelRow, field: string): string {
 
 function clearPreview() {
   state.splitResult = null;
+  state.splitWarnings = [];
   state.previewSummary = null;
   clearPreviewError();
   previewSummary.classList.add('hidden');
@@ -969,6 +980,9 @@ function renderExportSummary() {
   if (!state.previewSummary || !state.importResult) return;
   const s = state.previewSummary;
   const outName = state.importResult.fileName.replace(/\.xlsx$/i, '') + '_拆分结果.xlsx';
+  const warningHtml = state.splitWarnings.length > 0
+    ? `<p><strong>微调提示：</strong>${state.splitWarnings.map(message => esc(message)).join('<br />')}</p>`
+    : '';
   exportSummaryEl.innerHTML = `
     <p><strong>源文件：</strong>${esc(state.importResult.fileName)}</p>
     <p><strong>原始行数：</strong>${s.originalRows} → <strong>拆分后行数：</strong>${s.splitRows}</p>
@@ -976,6 +990,7 @@ function renderExportSummary() {
     <p><strong>导出显示规则：</strong>取整拆分数量显示整数，小数拆分数量显示 3 位小数，金额固定 2 位小数</p>
     <p><strong>金额校验规则：</strong>每条待拆行在保留 2 位小数后，各包金额合计严格等于拆分前金额</p>
     <p><strong>参考金额规则：</strong>取整拆分 + 参考金额时，系统会按参考金额折算目标包金额，并尽量降低各包目标偏差</p>
+    ${warningHtml}
     <p><strong>输出文件名：</strong>${esc(outName)}</p>
   `;
   exportSummaryEl.classList.remove('hidden');

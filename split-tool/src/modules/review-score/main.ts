@@ -486,7 +486,8 @@ function buildPreviewTable(scoredRows: ScoredRow[]): { headHtml: string; bodyHtm
     const exportRow: Array<string | number> = [];
 
     for (let colIndex = 0; colIndex < state.imported!.columnCount; colIndex++) {
-      exportRow.push(rawValues[colIndex] || '');
+      const rawValue = rawValues[colIndex] || '';
+      exportRow.push(formatPreviewRawValue(state.imported!, colIndex, rawValue));
       placements.filter((placement) => placement.afterCol === colIndex).forEach((placement) => {
         const cell = scoreRow.cells[placement.rule.key];
         exportRow.push(cell.score == null ? '' : cell.score);

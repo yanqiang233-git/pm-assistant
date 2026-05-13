@@ -103,6 +103,11 @@ export interface PreviewSummary {
   }[];
 }
 
+export interface SplitExecutionResult {
+  rows: SplitRow[];
+  warnings: string[];
+}
+
 /** 应用全局状态 */
 export interface AppState {
   /** 导入阶段 */
@@ -113,6 +118,8 @@ export interface AppState {
   globalSplitMethod: SplitMethod;
   /** 拆分结果 */
   splitResult: SplitRow[] | null;
+  /** 拆分提示 */
+  splitWarnings: string[];
   /** 预览摘要 */
   previewSummary: PreviewSummary | null;
 }
