@@ -460,19 +460,24 @@ function getMicroAdjustmentSteps(qtyOutputScale: number, maxTransfer: bigint): b
   if (maxTransfer <= 0n) return [];
   if (qtyOutputScale === 0) return [1n];
 
+  const minimumStep = qtyOutputScale <= 2
+    ? 1n
+    : 10n ** BigInt(qtyOutputScale - 2);
+  if (maxTransfer < minimumStep) return [];
+
   const upperBound = maxTransfer > 5000n ? 5000n : maxTransfer;
   const steps: bigint[] = [];
 
-  for (let delta = 1n; delta <= upperBound; delta += 1n) {
-    if (delta <= 100n) {
+  for (let delta = minimumStep; delta <= upperBound; delta += minimumStep) {
+    if (delta <= 100n * minimumStep) {
       steps.push(delta);
       continue;
     }
-    if (delta <= 1000n) {
-      if (delta % 10n === 0n) steps.push(delta);
+    if (delta <= 1000n * minimumStep) {
+      if (delta % (10n * minimumStep) === 0n) steps.push(delta);
       continue;
     }
-    if (delta % 50n === 0n) steps.push(delta);
+    if (delta % (50n * minimumStep) === 0n) steps.push(delta);
   }
 
   if (steps[steps.length - 1] !== upperBound) {
