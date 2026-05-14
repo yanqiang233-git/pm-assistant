@@ -7,7 +7,7 @@ import {
   getTemplatesByCount, generateId
 } from './template/manager';
 import { parseSingleColumnPaste, parseTwoColumnPaste } from './config/paste';
-import { createInitialState, createFenbiaoConfigs, updateGlobalMethod, saveStateSnapshot } from './store/state';
+import { createInitialState, createFenbiaoConfigs, updateGlobalMethod, saveStateSnapshot, cloneFenbiaoConfigs } from './store/state';
 import {
   compareDecimalStrings,
   getDecimalScale,
@@ -24,8 +24,9 @@ import {
 import type {
   AppState, FenbiaoConfig, SplitMethod, RatioTemplate,
   SplitScope,
-  ImportResult, PasteResult, ExcelRow
+  ImportResult, PasteResult, ExcelRow, PurchaseRequestScopeItem, ResolveRowSplitScope
 } from './types';
+import { PKG_NAME_PATTERN } from './types';
 
 const SPLIT_SCOPE_LABELS: Record<SplitScope, string> = {
   rounded: '取整拆分',
@@ -36,9 +37,172 @@ function getSplitScopeLabel(scope: SplitScope): string {
   return SPLIT_SCOPE_LABELS[scope];
 }
 
+function getRequestScopeBadgeClass(scope: 'inherit' | SplitScope): string {
+  return scope === 'inherit' ? 'inherit' : scope;
+}
+
+function getRequestScopeDisplayLabel(scope: 'inherit' | SplitScope): string {
+  return scope === 'inherit' ? '继承分标默认' : getSplitScopeLabel(scope);
+}
+
+function cloneConfigs(configs: FenbiaoConfig[]): FenbiaoConfig[] {
+  return cloneFenbiaoConfigs(configs);
+}
+
+function isPendingSplitRow(row: ExcelRow): boolean {
+  const pkgName = String(row['分包名称'] ?? '').trim();
+  return !pkgName || !PKG_NAME_PATTERN.test(pkgName);
+}
+
+function getRequestNo(row: ExcelRow): string {
+  return String(row['网省采购申请号'] ?? '').trim();
+}
+
+function getMaterialDescription(row: ExcelRow): string {
+  return String(row['物资描述'] ?? row['物资名称'] ?? '').trim();
+}
+
+function getUnitLabel(row: ExcelRow): string {
+  return String(row['计量单位'] ?? '').trim();
+}
+
+function getQuantityLabel(row: ExcelRow): string {
+  return normalizeDecimalString(row['数量']) ?? String(row['数量'] ?? '');
+}
+
+function getFenbiaoConfigByName(name: string): FenbiaoConfig | undefined {
+  return state.fenbiaoConfigs.find(config => config.name === name);
+}
+
+const resolveEffectiveSplitScope: ResolveRowSplitScope = (row, config) => {
+  const targetConfig = config ?? getFenbiaoConfigByName(String(row['分标名称'] ?? '').trim());
+  if (!targetConfig) return 'decimal';
+  const requestNo = getRequestNo(row);
+  return requestNo && targetConfig.requestScopeOverrides?.[requestNo]
+    ? targetConfig.requestScopeOverrides[requestNo]
+    : targetConfig.splitScope;
+};
+
+function getRequestScopeItems(fenbiaoName: string): PurchaseRequestScopeItem[] {
+  if (!state.importResult?.success) return [];
+  return state.importResult.rows
+    .filter(row => String(row['分标名称'] ?? '').trim() === fenbiaoName)
+    .filter(isPendingSplitRow)
+    .map(row => ({
+      fenbiaoName,
+      requestNo: getRequestNo(row),
+      materialDescription: getMaterialDescription(row),
+      unit: getUnitLabel(row),
+      quantity: getQuantityLabel(row)
+    }))
+    .filter(item => item.requestNo)
+    .sort((left, right) => left.requestNo.localeCompare(right.requestNo, 'zh-CN'));
+}
+
+function getRequestFilterState(fenbiaoName: string): { unit: string; keyword: string } {
+  return requestScopeFilters.get(fenbiaoName) ?? { unit: '', keyword: '' };
+}
+
+function setRequestFilterState(fenbiaoName: string, patch: Partial<{ unit: string; keyword: string }>): void {
+  const current = getRequestFilterState(fenbiaoName);
+  requestScopeFilters.set(fenbiaoName, {
+    unit: patch.unit ?? current.unit,
+    keyword: patch.keyword ?? current.keyword
+  });
+}
+
+function getFilteredRequestScopeItems(config: FenbiaoConfig): PurchaseRequestScopeItem[] {
+  const filterState = getRequestFilterState(config.name);
+  const keyword = filterState.keyword.trim().toLowerCase();
+  return getRequestScopeItems(config.name).filter(item => {
+    const unitMatched = !filterState.unit || item.unit === filterState.unit;
+    const keywordMatched = !keyword || item.materialDescription.toLowerCase().includes(keyword);
+    return unitMatched && keywordMatched;
+  });
+}
+
+function getFilteredFenbiaoConfigs(configs: FenbiaoConfig[]): FenbiaoConfig[] {
+  const keyword = requestScopeFenbiaoKeyword.trim().toLowerCase();
+  if (!keyword) return configs;
+  return configs.filter(config => config.name.toLowerCase().includes(keyword));
+}
+
+function isRequestFenbiaoExpanded(fenbiaoName: string): boolean {
+  return expandedRequestFenbiaos.has(fenbiaoName);
+}
+
+function setRequestScopeSectionExpanded(expanded: boolean): void {
+  requestScopeSectionExpanded = expanded;
+  btnToggleRequestScope.textContent = expanded ? '收起' : '展开';
+  requestScopeToolbar.classList.toggle('hidden', !expanded);
+  requestScopeContent.classList.toggle('hidden', !expanded);
+}
+
+function setFenbiaoSplitScope(configIdx: number, nextScope: SplitScope, promptSyncOverrides: boolean): void {
+  const config = state.fenbiaoConfigs[configIdx];
+  if (!config || config.splitScope === nextScope) return;
+
+  const overrideKeys = Object.keys(config.requestScopeOverrides ?? {});
+  const nextConfig: FenbiaoConfig = {
+    ...config,
+    splitScope: nextScope,
+    requestScopeOverrides: { ...(config.requestScopeOverrides ?? {}) }
+  };
+
+  if (promptSyncOverrides && overrideKeys.length > 0) {
+    const shouldSync = confirm(
+      `分标“${config.name}”下已有 ${overrideKeys.length} 条采购申请级覆盖。\n\n是否将这些已覆盖项同步为“${getSplitScopeLabel(nextScope)}”？\n\n确定：同步已覆盖项\n取消：仅修改分标默认，保留已覆盖项`
+    );
+    if (shouldSync) {
+      nextConfig.requestScopeOverrides = Object.fromEntries(
+        overrideKeys.map(requestNo => [requestNo, nextScope])
+      );
+    }
+  }
+
+  state.fenbiaoConfigs[configIdx] = nextConfig;
+}
+
+function setRequestScopeOverride(fenbiaoName: string, requestNo: string, nextValue: 'inherit' | SplitScope): void {
+  const idx = state.fenbiaoConfigs.findIndex(config => config.name === fenbiaoName);
+  if (idx < 0) return;
+  const config = state.fenbiaoConfigs[idx];
+  const overrides = { ...(config.requestScopeOverrides ?? {}) };
+  if (nextValue === 'inherit') {
+    delete overrides[requestNo];
+  } else {
+    overrides[requestNo] = nextValue;
+  }
+  state.fenbiaoConfigs[idx] = {
+    ...config,
+    requestScopeOverrides: overrides
+  };
+}
+
+function applyBatchRequestScope(fenbiaoName: string, nextValue: 'inherit' | SplitScope): void {
+  const config = getFenbiaoConfigByName(fenbiaoName);
+  if (!config) return;
+  const matchedItems = getFilteredRequestScopeItems(config);
+  if (matchedItems.length === 0) {
+    alert(`分标“${fenbiaoName}”当前筛选条件下没有可批量调整的采购申请。`);
+    return;
+  }
+
+  matchedItems.forEach(item => {
+    setRequestScopeOverride(fenbiaoName, item.requestNo, nextValue);
+  });
+  renderRequestScopeAdjustments();
+  clearPreview();
+  persistModuleState();
+}
+
 // ============ State ============
 let state: AppState = createInitialState();
 let initialConfigs: FenbiaoConfig[] = []; // for reset
+const requestScopeFilters = new Map<string, { unit: string; keyword: string }>();
+const expandedRequestFenbiaos = new Set<string>();
+let requestScopeSectionExpanded = false;
+let requestScopeFenbiaoKeyword = '';
 
 // ============ DOM refs ============
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -73,6 +237,18 @@ const btnDownloadSplitTpl = $('btnDownloadSplitTpl');
 const btnImportSplitTpl = $('btnImportSplitTpl');
 const splitTplFileInput = $<HTMLInputElement>('splitTplFileInput');
 const splitImportResult = $('splitImportResult');
+
+const sectionRequestScope = $('section-request-scope');
+const btnToggleRequestScope = $('btnToggleRequestScope');
+const requestScopeStatus = $('requestScopeStatus');
+const requestScopeToolbar = $('requestScopeToolbar');
+const requestScopeContent = $('requestScopeContent');
+const requestScopeFenbiaoFilter = $<HTMLInputElement>('requestScopeFenbiaoFilter');
+const btnExpandRequestPanels = $('btnExpandRequestPanels');
+const btnCollapseRequestPanels = $('btnCollapseRequestPanels');
+const requestScopeSummary = $('requestScopeSummary');
+const requestScopeEmpty = $('requestScopeEmpty');
+const requestScopePanels = $('requestScopePanels');
 
 const sectionTemplate = $('section-template');
 const templateGroups = $('templateGroups');
@@ -141,6 +317,29 @@ const fixedAmountOk = $('fixedAmountOk');
 const fixedAmountCancel = $('fixedAmountCancel');
 const fixedAmountClose = $('fixedAmountClose');
 
+btnToggleRequestScope.addEventListener('click', () => {
+  setRequestScopeSectionExpanded(!requestScopeSectionExpanded);
+});
+
+requestScopeFenbiaoFilter.addEventListener('input', () => {
+  requestScopeFenbiaoKeyword = requestScopeFenbiaoFilter.value;
+  renderRequestScopeAdjustments();
+});
+
+btnExpandRequestPanels.addEventListener('click', () => {
+  getFilteredFenbiaoConfigs(state.fenbiaoConfigs.filter(config => config.packageCount >= 1)).forEach(config => {
+    expandedRequestFenbiaos.add(config.name);
+  });
+  renderRequestScopeAdjustments();
+});
+
+btnCollapseRequestPanels.addEventListener('click', () => {
+  expandedRequestFenbiaos.clear();
+  renderRequestScopeAdjustments();
+});
+
+setRequestScopeSectionExpanded(false);
+
 // ============ Import ============
 btnImport.addEventListener('click', () => fileInput.click());
 btnDownloadSourceTpl.addEventListener('click', async () => {
@@ -175,13 +374,15 @@ function renderImportResult(r: ImportResult) {
     importErrors.classList.add('hidden');
     // 初始化分标配置
     state.fenbiaoConfigs = createFenbiaoConfigs(r.fenbiaoNames, state.globalSplitMethod, r.exactFenbiaoQtyTotals);
-    initialConfigs = state.fenbiaoConfigs.map(c => ({ ...c }));
+    initialConfigs = cloneConfigs(state.fenbiaoConfigs);
     enableModule(sectionPkgConfig);
     enableModule(sectionSplitMethod);
+    enableModule(sectionRequestScope);
     enableModule(sectionPreview);
     enableModule(sectionExport);
     renderPkgConfig();
     renderSplitMethod();
+    renderRequestScopeAdjustments();
     updatePkgSummary();
   } else {
     importStatus.textContent = '校验失败';
@@ -198,6 +399,7 @@ function renderImportResult(r: ImportResult) {
     importErrors.classList.remove('hidden');
     disableModule(sectionPkgConfig);
     disableModule(sectionSplitMethod);
+    disableModule(sectionRequestScope);
     disableModule(sectionPreview);
     disableModule(sectionExport);
   }
@@ -240,6 +442,7 @@ function renderPkgConfig() {
       }
       updatePkgSummary();
       renderSplitMethod();
+      renderRequestScopeAdjustments();
       clearPreview();
       persistModuleState();
     });
@@ -248,8 +451,9 @@ function renderPkgConfig() {
     select.addEventListener('change', (e) => {
       const el = e.target as HTMLSelectElement;
       const idx = parseInt(el.dataset.idx!);
-      state.fenbiaoConfigs[idx].splitScope = el.value as SplitScope;
+      setFenbiaoSplitScope(idx, el.value as SplitScope, true);
       renderSplitMethod();
+      renderRequestScopeAdjustments();
       clearPreview();
       persistModuleState();
     });
@@ -311,6 +515,7 @@ pasteModalOk.addEventListener('click', () => {
   renderPkgConfig();
   updatePkgSummary();
   renderSplitMethod();
+  renderRequestScopeAdjustments();
   clearPreview();
   persistModuleState();
 });
@@ -362,9 +567,11 @@ tplFileInput.addEventListener('change', async () => {
     const scopeMap = new Map(data.map(item => [item.name, item.splitScope]));
     state.fenbiaoConfigs = parsed.configs.map(config => {
       const splitScope = scopeMap.get(config.name);
-      return splitScope ? { ...config, splitScope } : config;
+      return splitScope
+        ? { ...config, splitScope, requestScopeOverrides: config.requestScopeOverrides ?? {} }
+        : { ...config, requestScopeOverrides: config.requestScopeOverrides ?? {} };
     });
-    const roundedErrors = collectRoundedScopeErrors(state.importResult!, state.fenbiaoConfigs);
+    const roundedErrors = collectRoundedScopeErrors(state.importResult!, state.fenbiaoConfigs, resolveEffectiveSplitScope);
     if (roundedErrors.length > 0) {
       showPasteResult({
         totalParsed: data.length,
@@ -373,10 +580,11 @@ tplFileInput.addEventListener('change', async () => {
         unmatchedNames: [],
         invalidValues: roundedErrors.slice(0, 20).map((message, index) => ({ line: index + 1, value: message }))
       });
-      state.fenbiaoConfigs = initialConfigs.map(c => ({ ...c }));
+      state.fenbiaoConfigs = cloneConfigs(initialConfigs);
       renderPkgConfig();
       updatePkgSummary();
       renderSplitMethod();
+      renderRequestScopeAdjustments();
       clearPreview();
       tplFileInput.value = '';
       return;
@@ -385,6 +593,7 @@ tplFileInput.addEventListener('change', async () => {
     renderPkgConfig();
     updatePkgSummary();
     renderSplitMethod();
+    renderRequestScopeAdjustments();
     clearPreview();
     mirrorUploadedTemplate(file, 'pkg');
     persistModuleState();
@@ -398,10 +607,11 @@ tplFileInput.addEventListener('change', async () => {
 });
 
 btnResetPkg.addEventListener('click', () => {
-  state.fenbiaoConfigs = initialConfigs.map(c => ({ ...c }));
+  state.fenbiaoConfigs = cloneConfigs(initialConfigs);
   renderPkgConfig();
   updatePkgSummary();
   renderSplitMethod();
+  renderRequestScopeAdjustments();
   clearPreview();
   pasteResultEl.classList.add('hidden');
 });
@@ -412,6 +622,7 @@ globalMethodSelect.addEventListener('change', () => {
   state.globalSplitMethod = method;
   state.fenbiaoConfigs = updateGlobalMethod(state.fenbiaoConfigs, method);
   renderSplitMethod();
+  renderRequestScopeAdjustments();
   clearPreview();
   persistModuleState();
 });
@@ -525,6 +736,183 @@ function renderSplitMethod() {
   });
 }
 
+function renderRequestScopeAdjustments(): void {
+  const configs = state.fenbiaoConfigs.filter(config => config.packageCount >= 1);
+  const filteredConfigs = getFilteredFenbiaoConfigs(configs);
+  const totalRequests = configs.reduce((sum, config) => sum + getRequestScopeItems(config.name).length, 0);
+  const totalOverrides = configs.reduce((sum, config) => sum + Object.keys(config.requestScopeOverrides ?? {}).length, 0);
+
+  if (!state.importResult?.success) {
+    requestScopeStatus.textContent = '待导入';
+    requestScopeStatus.className = 'status-badge';
+    requestScopeFenbiaoFilter.value = requestScopeFenbiaoKeyword;
+    requestScopeSummary.classList.add('hidden');
+    requestScopeEmpty.classList.add('hidden');
+    requestScopePanels.innerHTML = '';
+    return;
+  }
+
+  if (configs.length === 0) {
+    requestScopeStatus.textContent = '待配置';
+    requestScopeStatus.className = 'status-badge warning';
+    requestScopeFenbiaoFilter.value = requestScopeFenbiaoKeyword;
+    requestScopeSummary.classList.add('hidden');
+    requestScopeEmpty.textContent = '请先完成分包数量配置，再按分标默认口径查看和调整采购申请级拆分方式。';
+    requestScopeEmpty.classList.remove('hidden');
+    requestScopePanels.innerHTML = '';
+    return;
+  }
+
+  requestScopeStatus.textContent = totalOverrides > 0 ? `已覆盖 ${totalOverrides}` : '可调整';
+  requestScopeStatus.className = 'status-badge ' + (totalOverrides > 0 ? 'success' : 'warning');
+  requestScopeSummary.innerHTML = `
+    <span>已配置分标: <strong>${configs.length}</strong></span>
+    <span>待拆采购申请: <strong>${totalRequests}</strong></span>
+    <span>已覆盖采购申请: <strong>${totalOverrides}</strong></span>
+  `;
+  requestScopeFenbiaoFilter.value = requestScopeFenbiaoKeyword;
+  requestScopeSummary.classList.remove('hidden');
+  requestScopeEmpty.classList.toggle('hidden', filteredConfigs.length > 0);
+
+  if (filteredConfigs.length === 0) {
+    requestScopeEmpty.textContent = requestScopeFenbiaoKeyword.trim()
+      ? `未找到匹配“${requestScopeFenbiaoKeyword.trim()}”的分标。`
+      : '当前没有可调整的分标。';
+    requestScopePanels.innerHTML = '';
+    return;
+  }
+
+  let html = '';
+  filteredConfigs.forEach(config => {
+    const items = getRequestScopeItems(config.name);
+    const filterState = getRequestFilterState(config.name);
+    const filteredItems = getFilteredRequestScopeItems(config);
+    const units = [...new Set(items.map(item => item.unit).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'zh-CN'));
+    const overrideCount = Object.keys(config.requestScopeOverrides ?? {}).length;
+    const panelExpanded = isRequestFenbiaoExpanded(config.name);
+    const rowsHtml = filteredItems.length > 0
+      ? filteredItems.map(item => {
+          const overrideValue = config.requestScopeOverrides?.[item.requestNo];
+          const effectiveScope = overrideValue ?? config.splitScope;
+          return `<tr>
+            <td class="request-mono">${esc(item.requestNo)}</td>
+            <td>${esc(item.materialDescription || '-')}</td>
+            <td>${esc(item.unit || '-')}</td>
+            <td>${esc(item.quantity || '-')}</td>
+            <td><span class="request-scope-badge ${getRequestScopeBadgeClass(overrideValue ? overrideValue : 'inherit')}">${esc(getRequestScopeDisplayLabel(overrideValue ? overrideValue : 'inherit'))}</span></td>
+            <td><span class="request-scope-badge ${getRequestScopeBadgeClass(effectiveScope)}">${esc(getSplitScopeLabel(effectiveScope))}</span></td>
+            <td>
+              <select class="request-scope-select" data-fenbiao="${esc(config.name)}" data-request-no="${esc(item.requestNo)}">
+                <option value="inherit" ${overrideValue ? '' : 'selected'}>继承分标默认</option>
+                <option value="rounded" ${overrideValue === 'rounded' ? 'selected' : ''}>取整拆分</option>
+                <option value="decimal" ${overrideValue === 'decimal' ? 'selected' : ''}>小数拆分</option>
+              </select>
+            </td>
+          </tr>`;
+        }).join('')
+      : '<tr><td colspan="7" style="text-align:center;color:var(--color-text-secondary)">当前筛选条件下无匹配采购申请</td></tr>';
+
+    html += `<div class="request-scope-panel ${panelExpanded ? '' : 'is-collapsed'}">
+      <div class="request-scope-panel-header">
+        <div class="request-scope-panel-title">
+          <button class="btn btn-sm request-scope-panel-toggle" data-toggle-fenbiao="${esc(config.name)}">${panelExpanded ? '收起' : '展开'}</button>
+          <strong>${esc(config.name)}</strong>
+          <span class="request-scope-badge ${getRequestScopeBadgeClass(config.splitScope)}">默认：${esc(getSplitScopeLabel(config.splitScope))}</span>
+        </div>
+        <div class="request-scope-panel-meta">
+          <span>采购申请数：${items.length}</span>
+          <span>已覆盖：${overrideCount}</span>
+          <span>筛选命中：${filteredItems.length}</span>
+        </div>
+      </div>
+      <div class="request-scope-panel-body">
+      <div class="request-filter-bar">
+        <div class="request-filter-control">
+          <label>单位筛选</label>
+          <select class="request-unit-filter" data-fenbiao="${esc(config.name)}">
+            <option value="">全部单位</option>
+            ${units.map(unit => `<option value="${esc(unit)}" ${filterState.unit === unit ? 'selected' : ''}>${esc(unit)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="request-filter-control">
+          <label>物料描述筛选</label>
+          <input type="text" class="request-keyword-filter" data-fenbiao="${esc(config.name)}" value="${esc(filterState.keyword)}" placeholder="输入物料描述关键字后筛选并批量调整" />
+        </div>
+        <div class="request-batch-actions">
+          <button class="btn btn-sm" data-batch-scope="rounded" data-fenbiao="${esc(config.name)}">筛选结果批量设为取整</button>
+          <button class="btn btn-sm" data-batch-scope="decimal" data-fenbiao="${esc(config.name)}">筛选结果批量设为小数</button>
+          <button class="btn btn-sm btn-danger" data-batch-scope="inherit" data-fenbiao="${esc(config.name)}">筛选结果恢复继承</button>
+        </div>
+      </div>
+      <div class="config-table-wrap request-table-wrap">
+        <table class="config-table request-scope-table">
+          <thead>
+            <tr>
+              <th>网省采购申请号</th>
+              <th>物料描述</th>
+              <th>单位</th>
+              <th>数量</th>
+              <th>覆盖状态</th>
+              <th>当前生效口径</th>
+              <th>调整方式</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+      </div>
+    </div>`;
+  });
+
+  requestScopePanels.innerHTML = html;
+
+  requestScopePanels.querySelectorAll('.request-unit-filter').forEach(element => {
+    element.addEventListener('change', event => {
+      const select = event.target as HTMLSelectElement;
+      setRequestFilterState(select.dataset.fenbiao!, { unit: select.value });
+      renderRequestScopeAdjustments();
+    });
+  });
+
+  requestScopePanels.querySelectorAll('.request-keyword-filter').forEach(element => {
+    element.addEventListener('input', event => {
+      const input = event.target as HTMLInputElement;
+      setRequestFilterState(input.dataset.fenbiao!, { keyword: input.value });
+      renderRequestScopeAdjustments();
+    });
+  });
+
+  requestScopePanels.querySelectorAll('[data-batch-scope]').forEach(element => {
+    element.addEventListener('click', event => {
+      const button = event.target as HTMLButtonElement;
+      applyBatchRequestScope(button.dataset.fenbiao!, button.dataset.batchScope as 'inherit' | SplitScope);
+    });
+  });
+
+  requestScopePanels.querySelectorAll('.request-scope-select').forEach(element => {
+    element.addEventListener('change', event => {
+      const select = event.target as HTMLSelectElement;
+      setRequestScopeOverride(select.dataset.fenbiao!, select.dataset.requestNo!, select.value as 'inherit' | SplitScope);
+      renderRequestScopeAdjustments();
+      clearPreview();
+      persistModuleState();
+    });
+  });
+
+  requestScopePanels.querySelectorAll('[data-toggle-fenbiao]').forEach(element => {
+    element.addEventListener('click', event => {
+      const button = event.target as HTMLButtonElement;
+      const fenbiaoName = button.dataset.toggleFenbiao!;
+      if (expandedRequestFenbiaos.has(fenbiaoName)) {
+        expandedRequestFenbiaos.delete(fenbiaoName);
+      } else {
+        expandedRequestFenbiaos.add(fenbiaoName);
+      }
+      renderRequestScopeAdjustments();
+    });
+  });
+}
+
 // ============ Split Config Template download/import ============
 
 btnDownloadSplitTpl.addEventListener('click', async () => {
@@ -579,7 +967,8 @@ splitTplFileInput.addEventListener('change', async () => {
   for (const r of result.rows) {
     const idx = state.fenbiaoConfigs.findIndex(c => c.name === r.name);
     if (idx < 0) continue;
-    state.fenbiaoConfigs[idx].splitScope = r.splitScope;
+    setFenbiaoSplitScope(idx, r.splitScope, false);
+    state.fenbiaoConfigs[idx].requestScopeOverrides = state.fenbiaoConfigs[idx].requestScopeOverrides ?? {};
     state.fenbiaoConfigs[idx].splitMethod = r.method;
     state.fenbiaoConfigs[idx].overridden = true;
     state.fenbiaoConfigs[idx].templateId = undefined;
@@ -619,6 +1008,7 @@ splitTplFileInput.addEventListener('change', async () => {
   persistModuleState();
   splitTplFileInput.value = '';
   renderSplitMethod();
+  renderRequestScopeAdjustments();
   renderTemplateManagement();
   clearPreview();
 });
@@ -873,9 +1263,9 @@ btnExecuteSplit.addEventListener('click', () => {
     return;
   }
 
-  const roundedErrors = collectRoundedScopeErrors(state.importResult!, state.fenbiaoConfigs);
+  const roundedErrors = collectRoundedScopeErrors(state.importResult!, state.fenbiaoConfigs, resolveEffectiveSplitScope);
   if (roundedErrors.length > 0) {
-    const reason = `以下分标已配置为取整拆分，但数量存在小数：${roundedErrors.slice(0, 20).join('、')}`;
+    const reason = `以下采购申请已配置为取整拆分，但数量存在小数：${roundedErrors.slice(0, 20).join('、')}`;
     showPreviewError(reason, '数量口径不匹配');
     alert(reason);
     return;
@@ -883,7 +1273,7 @@ btnExecuteSplit.addEventListener('click', () => {
 
   try {
     const templates = loadTemplates();
-    const executionResult = executeSplit(state.importResult!.rows, state.fenbiaoConfigs, templates);
+    const executionResult = executeSplit(state.importResult!.rows, state.fenbiaoConfigs, templates, resolveEffectiveSplitScope);
     state.splitResult = executionResult.rows;
     state.splitWarnings = executionResult.warnings;
     state.previewSummary = generatePreviewSummary(
@@ -950,7 +1340,7 @@ function formatPreviewCellValue(row: ExcelRow, field: string): string {
   const value = row[field];
   if (field === '数量') {
     const fenbiaoName = String(row['分标名称'] ?? '').trim();
-    const splitScope = state.fenbiaoConfigs.find(config => config.name === fenbiaoName)?.splitScope ?? 'decimal';
+    const splitScope = resolveEffectiveSplitScope(row, getFenbiaoConfigByName(fenbiaoName));
     return toFixedDecimalString(value, splitScope === 'rounded' ? 0 : 3) ?? String(value ?? '');
   }
   if (field === '估算单价（元）' || field === '估算总价（元）') {
@@ -1005,7 +1395,7 @@ btnExport.addEventListener('click', async () => {
   }
   try {
     const outName = state.importResult.fileName.replace(/\.xlsx$/i, '') + '_拆分结果.xlsx';
-    const buf = await exportToXlsx(state.splitResult, state.importResult.headerOrder, outName, state.fenbiaoConfigs);
+    const buf = await exportToXlsx(state.splitResult, state.importResult.headerOrder, outName, state.fenbiaoConfigs, resolveEffectiveSplitScope);
     mirrorExportResult(buf);
     exportStatus.textContent = '已导出';
     exportStatus.className = 'status-badge success';
@@ -1057,26 +1447,19 @@ function persistModuleState(): void {
   });
 }
 
-function collectRoundedScopeErrors(importResult: ImportResult, configs: FenbiaoConfig[]): string[] {
+function collectRoundedScopeErrors(importResult: ImportResult, configs: FenbiaoConfig[], resolveRowScope: ResolveRowSplitScope): string[] {
   const configMap = new Map(configs.map(config => [config.name, config]));
   const errors: string[] = [];
 
-  for (const config of configs) {
-    if (config.splitScope !== 'rounded') continue;
-    const totalQty = importResult.exactFenbiaoQtyTotals[config.name] ?? '0';
-    if (getDecimalScale(totalQty) > 0) {
-      errors.push(`${config.name}：分标总数量 ${totalQty}`);
-    }
-  }
-
   importResult.rows.forEach((row, index) => {
+    if (!isPendingSplitRow(row)) return;
     const fenbiaoName = String(row['分标名称'] ?? '').trim();
     const config = configMap.get(fenbiaoName);
-    if (!config || config.splitScope !== 'rounded') return;
+    if (!config || resolveRowScope(row, config) !== 'rounded') return;
     const qty = normalizeDecimalString(row['数量']) ?? '';
     if (!qty || getDecimalScale(qty) > 0) {
-      const pkgName = String(row['分包名称'] ?? '').trim() || '(待拆分)';
-      errors.push(`${fenbiaoName}：第${index + 2}行数量 ${String(row['数量'] ?? '')}，分包名称 ${pkgName}`);
+      const requestNo = getRequestNo(row) || '(空)';
+      errors.push(`${fenbiaoName}：网省采购申请号 ${requestNo}，第${index + 2}行数量 ${String(row['数量'] ?? '')}`);
     }
   });
 
@@ -1112,16 +1495,18 @@ async function initModule(): Promise<void> {
     if (namesMatch) {
       state.fenbiaoConfigs = savedConfigs.map(config => ({
         ...config,
-        splitScope: config.splitScope ?? (getDecimalScale(result.exactFenbiaoQtyTotals[config.name] ?? '0') === 0 ? 'rounded' : 'decimal')
+        splitScope: config.splitScope ?? (getDecimalScale(result.exactFenbiaoQtyTotals[config.name] ?? '0') === 0 ? 'rounded' : 'decimal'),
+        requestScopeOverrides: config.requestScopeOverrides ?? {}
       }));
       state.globalSplitMethod = saved.globalSplitMethod as SplitMethod;
       globalMethodSelect.value = state.globalSplitMethod;
     }
   }
-  initialConfigs = state.fenbiaoConfigs.map(c => ({ ...c }));
+  initialConfigs = cloneConfigs(state.fenbiaoConfigs);
 
   renderPkgConfig();
   updatePkgSummary();
   renderSplitMethod();
+  renderRequestScopeAdjustments();
 }
 initModule();

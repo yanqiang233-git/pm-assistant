@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
-import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate, SplitScope, REQUIRED_FIELDS } from '../types';
+import { SplitRow, FenbiaoConfig, SplitMethod, RatioTemplate, SplitScope, REQUIRED_FIELDS, ResolveRowSplitScope } from '../types';
 import {
   bigIntToDecimalString,
   compareDecimalStrings,
@@ -175,7 +175,8 @@ function applyExportNumberFormat(
   ws: XLSX.WorkSheet,
   headerOrder: string[],
   rows: SplitRow[],
-  configMap: Map<string, FenbiaoConfig>
+  configMap: Map<string, FenbiaoConfig>,
+  resolveRowSplitScope?: ResolveRowSplitScope
 ): void {
   for (let colIndex = 0; colIndex < headerOrder.length; colIndex++) {
     const field = headerOrder[colIndex];
@@ -186,8 +187,10 @@ function applyExportNumberFormat(
       const cell = ws[cellRef];
       if (cell?.t === 'n') {
         if (field === '数量') {
-          const fenbiaoName = String(rows[rowIndex - 1]?.['分标名称'] ?? '').trim();
-          const splitScope = configMap.get(fenbiaoName)?.splitScope ?? 'decimal';
+          const row = rows[rowIndex - 1];
+          const fenbiaoName = String(row?.['分标名称'] ?? '').trim();
+          const config = configMap.get(fenbiaoName);
+          const splitScope = resolveRowSplitScope?.(row, config) ?? config?.splitScope ?? 'decimal';
           cell.z = splitScope === 'rounded' ? '0' : '0.000';
         } else {
           cell.z = format;
@@ -275,7 +278,8 @@ export async function exportToXlsx(
   rows: SplitRow[],
   headerOrder: string[],
   outputFileName: string,
-  configs: FenbiaoConfig[] = []
+  configs: FenbiaoConfig[] = [],
+  resolveRowSplitScope?: ResolveRowSplitScope
 ): Promise<Uint8Array> {
   const configMap = new Map(configs.map(config => [config.name, config]));
   const wsData: unknown[][] = [headerOrder];
@@ -284,7 +288,7 @@ export async function exportToXlsx(
     wsData.push(line);
   }
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-  applyExportNumberFormat(ws, headerOrder, rows, configMap);
+  applyExportNumberFormat(ws, headerOrder, rows, configMap, resolveRowSplitScope);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
   const rawData = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));

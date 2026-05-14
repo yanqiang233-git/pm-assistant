@@ -1,6 +1,6 @@
 import {
   ExcelRow, SplitRow, FenbiaoConfig, SplitExecutionResult, SplitMethod,
-  RatioTemplate, PreviewSummary, PKG_NAME_PATTERN
+  RatioTemplate, PreviewSummary, PKG_NAME_PATTERN, ResolveRowSplitScope, SplitScope
 } from '../types';
 import {
   bigIntToDecimalString,
@@ -398,16 +398,14 @@ interface GeneratedRowPlan {
   contextLabel: string;
   amtTarget: bigint;
   qtyTarget: bigint;
+  qtyOutputScale: number;
   unitPriceInt: bigint;
   unitPriceScale: number;
   qtyShares: bigint[];
   amountShares: bigint[];
 }
 
-function materializeGeneratedRowPlans(
-  rowPlans: GeneratedRowPlan[],
-  qtyOutputScale: number
-): SplitRow[] {
+function materializeGeneratedRowPlans(rowPlans: GeneratedRowPlan[]): SplitRow[] {
   const splitRows: SplitRow[] = [];
 
   for (const rowPlan of rowPlans) {
@@ -416,7 +414,7 @@ function materializeGeneratedRowPlans(
       newRow['分包名称'] = `包${index + 1}`;
       newRow['分包编号'] = `JS${(index + 1) * 100}`;
       newRow['估算总价（元）'] = bigIntToDecimalString(rowPlan.amountShares[index], AMOUNT_OUTPUT_SCALE);
-      newRow['数量'] = bigIntToDecimalString(rowPlan.qtyShares[index], qtyOutputScale);
+      newRow['数量'] = bigIntToDecimalString(rowPlan.qtyShares[index], rowPlan.qtyOutputScale);
       splitRows.push(newRow);
     }
   }
@@ -497,13 +495,12 @@ function buildAdjustmentPriorityOrder(length: number, primary: number, secondary
 function rebuildAmountSharesFromQtyShares(
   rowPlan: GeneratedRowPlan,
   qtyShares: bigint[],
-  qtyOutputScale: number,
   favoredIndex: number,
   constrainedIndex: number
 ): bigint[] {
   const amountCandidates = qtyShares.map(value => multiplyToScale(
     value,
-    qtyOutputScale,
+    rowPlan.qtyOutputScale,
     rowPlan.unitPriceInt,
     rowPlan.unitPriceScale,
     AMOUNT_OUTPUT_SCALE
@@ -521,8 +518,7 @@ function tryMicroAdjustPair(
   rowPlans: GeneratedRowPlan[],
   packageAmounts: bigint[],
   leftIndex: number,
-  rightIndex: number,
-  qtyOutputScale: number
+  rightIndex: number
 ): boolean {
   let bestCandidate: {
     rowPlan: GeneratedRowPlan;
@@ -537,7 +533,7 @@ function tryMicroAdjustPair(
     const maxTransfer = rowPlan.qtyShares[rightIndex] - 1n;
     if (maxTransfer <= 0n) continue;
 
-    const deltas = getMicroAdjustmentSteps(qtyOutputScale, maxTransfer);
+    const deltas = getMicroAdjustmentSteps(rowPlan.qtyOutputScale, maxTransfer);
     for (const delta of deltas) {
       if (rowPlan.qtyShares[rightIndex] <= delta) continue;
 
@@ -550,7 +546,6 @@ function tryMicroAdjustPair(
       const nextAmountShares = rebuildAmountSharesFromQtyShares(
         rowPlan,
         nextQtyShares,
-        qtyOutputScale,
         leftIndex,
         rightIndex
       );
@@ -608,8 +603,7 @@ function applyFenbiaoGroupMicroAdjustments(
   fbName: string,
   rowPlans: GeneratedRowPlan[],
   packageAmounts: bigint[],
-  packageGroups: number[][],
-  qtyOutputScale: number
+  packageGroups: number[][]
 ): string[] {
   const warnings: string[] = [];
 
@@ -625,7 +619,7 @@ function applyFenbiaoGroupMicroAdjustments(
         const leftIndex = group[index];
         const rightIndex = group[index + 1];
         if (packageAmounts[leftIndex] > packageAmounts[rightIndex]) continue;
-        if (!tryMicroAdjustPair(rowPlans, packageAmounts, leftIndex, rightIndex, qtyOutputScale)) {
+        if (!tryMicroAdjustPair(rowPlans, packageAmounts, leftIndex, rightIndex)) {
           groupAdjustable = false;
           break;
         }
@@ -862,7 +856,8 @@ export class SplitExecutionError extends Error {
 export function executeSplit(
   rows: ExcelRow[],
   configs: FenbiaoConfig[],
-  templates: RatioTemplate[]
+  templates: RatioTemplate[],
+  resolveRowSplitScope?: ResolveRowSplitScope
 ): SplitExecutionResult {
   const configMap = new Map(configs.map(c => [c.name, c]));
   const templateMap = new Map(templates.map(t => [t.id, t]));
@@ -923,10 +918,13 @@ export function executeSplit(
     // ── 计算精度参数 ──
     const amountDecimals = fbRows.map(row => getNormalizedDecimal(row, '估算总价（元）'));
     const qtyDecimals = fbRows.map(row => getNormalizedDecimal(row, '数量'));
+    const resolveScopeForFenbiaoRow = (row: ExcelRow): SplitScope =>
+      resolveRowSplitScope?.(row, config) ?? config.splitScope;
+    const rowSplitScopes = toSplitRows.map(resolveScopeForFenbiaoRow);
+    const maxQtyOutputScale = rowSplitScopes.some(scope => scope === 'decimal') ? QTY_OUTPUT_SCALE : ROUNDED_QTY_OUTPUT_SCALE;
     // 内部运算精度：取数据实际精度与输出精度的较大值
     const amountScale = Math.max(getMaxDecimalScale(amountDecimals), AMOUNT_OUTPUT_SCALE);
-    const qtyOutputScale = config.splitScope === 'rounded' ? ROUNDED_QTY_OUTPUT_SCALE : QTY_OUTPUT_SCALE;
-    const qtyScale = Math.max(getMaxDecimalScale(qtyDecimals), qtyOutputScale);
+    const qtyScale = Math.max(getMaxDecimalScale(qtyDecimals), maxQtyOutputScale);
 
     // ── 输出预分配行（自动补分包编号）──
     for (const row of preAllocRows) {
@@ -962,7 +960,7 @@ export function executeSplit(
     );
     let fixedAmountRoundedTargets: bigint[] | null = null;
     try {
-      fixedAmountRoundedTargets = method === 'fixedAmount' && config.fixedAmounts && config.splitScope === 'rounded'
+      fixedAmountRoundedTargets = method === 'fixedAmount' && config.fixedAmounts && rowSplitScopes.length > 0 && rowSplitScopes.every(scope => scope === 'rounded')
         ? buildFixedAmountTargets(
             totalRoundedAmount,
             config.fixedAmounts
@@ -979,6 +977,8 @@ export function executeSplit(
       for (let rowIdx = 0; rowIdx < toSplitRows.length; rowIdx++) {
         const row = toSplitRows[rowIdx];
         const contextLabel = `分标"${fbName}"第${rowIdx + 1}条待拆行：`;
+        const rowSplitScope = rowSplitScopes[rowIdx] ?? config.splitScope;
+        const qtyOutputScale = rowSplitScope === 'rounded' ? ROUNDED_QTY_OUTPUT_SCALE : QTY_OUTPUT_SCALE;
 
         try {
           if (getDecimalScale(getNormalizedDecimal(row, '数量')) > 0) {
@@ -1029,7 +1029,7 @@ export function executeSplit(
             input,
             fixedAmountRoundedTargets!,
             packageAmounts,
-            qtyOutputScale,
+            ROUNDED_QTY_OUTPUT_SCALE,
             rowIdx === rowInputs.length - 1
           );
           for (let index = 0; index < packageAmounts.length; index++) {
@@ -1042,10 +1042,10 @@ export function executeSplit(
           rowPlans,
           fixedAmountRoundedTargets,
           packageAmounts,
-          qtyOutputScale
+          ROUNDED_QTY_OUTPUT_SCALE
         );
 
-        result.push(...materializeFixedAmountRoundedRowPlans(rowPlans, qtyOutputScale));
+        result.push(...materializeFixedAmountRoundedRowPlans(rowPlans, ROUNDED_QTY_OUTPUT_SCALE));
       } catch (error) {
         executionErrors.push(error instanceof Error ? error.message : String(error));
       }
@@ -1062,7 +1062,9 @@ export function executeSplit(
         const row = toSplitRows[rowIdx];
         const isLastRow = rowIdx === toSplitRows.length - 1;
         const contextLabel = `分标"${fbName}"第${rowIdx + 1}条待拆行：`;
-        if (config.splitScope === 'rounded' && getDecimalScale(getNormalizedDecimal(row, '数量')) > 0) {
+        const rowSplitScope = rowSplitScopes[rowIdx] ?? config.splitScope;
+        const qtyOutputScale = rowSplitScope === 'rounded' ? ROUNDED_QTY_OUTPUT_SCALE : QTY_OUTPUT_SCALE;
+        if (rowSplitScope === 'rounded' && getDecimalScale(getNormalizedDecimal(row, '数量')) > 0) {
           throw new Error(`分标"${fbName}"存在小数数量，不能按取整拆分执行`);
         }
         const rowAmountInt = rowAmountsInt[rowIdx];
@@ -1113,7 +1115,7 @@ export function executeSplit(
               isLastRow
             )
           : priceShares;
-        const initialRoundedAmts = config.splitScope === 'rounded'
+        const initialRoundedAmts = rowSplitScope === 'rounded'
           ? buildPositiveIntegerShares(amtTarget, amountWeightBasis, 1n, '金额', contextLabel)
           : useFixedAmountRoundedOptimization
             ? amountWeightBasis
@@ -1142,7 +1144,7 @@ export function executeSplit(
           roundedQtys = optimized.qtyShares;
           roundedAmts = optimized.amountShares;
         } else {
-          roundedQtys = config.splitScope === 'rounded'
+          roundedQtys = rowSplitScope === 'rounded'
             ? buildPositiveIntegerShares(qtyTarget, qtyWeightBasis, 1n, '数量', contextLabel)
             : roundAndReconcile(
                 splitBigIntByRatio(
@@ -1155,7 +1157,7 @@ export function executeSplit(
                 qtyOutputScale,
                 qtyTarget
               );
-          roundedAmts = config.splitScope === 'rounded'
+          roundedAmts = rowSplitScope === 'rounded'
             ? roundAndReconcile(
                 roundedQtys.map(value => multiplyToScale(
                   value,
@@ -1206,10 +1208,10 @@ export function executeSplit(
           contextLabel
         );
 
-        if (config.splitScope === 'rounded' && roundedAmts.some(value => value <= 0n)) {
+        if (rowSplitScope === 'rounded' && roundedAmts.some(value => value <= 0n)) {
           throw new Error(`${contextLabel}取整拆分后的金额存在 0 或负数，无法与非零数量保持一致`);
         }
-        if (config.splitScope === 'rounded' && roundedQtys.some(value => value <= 0n)) {
+        if (rowSplitScope === 'rounded' && roundedQtys.some(value => value <= 0n)) {
           throw new Error(`${contextLabel}取整拆分后的数量存在 0 或负数，请减少分包数量或调整原始数据`);
         }
 
@@ -1218,6 +1220,7 @@ export function executeSplit(
           contextLabel,
           amtTarget,
           qtyTarget,
+          qtyOutputScale,
           unitPriceInt,
           unitPriceScale,
           qtyShares: roundedQtys,
@@ -1242,13 +1245,12 @@ export function executeSplit(
             fbName,
             generatedRowPlans,
             packageAmounts,
-            packageGroups,
-            qtyOutputScale
+            packageGroups
           )
         );
       }
 
-      result.push(...materializeGeneratedRowPlans(generatedRowPlans, qtyOutputScale));
+      result.push(...materializeGeneratedRowPlans(generatedRowPlans));
     }
   }
 

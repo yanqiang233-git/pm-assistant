@@ -23,6 +23,18 @@ export type SplitMethod = 'average' | 'ratio' | 'fixedAmount';
 /** 数量拆分口径 */
 export type SplitScope = 'rounded' | 'decimal';
 
+/** 采购申请级口径覆盖 */
+export type PurchaseRequestScopeOverrides = Record<string, SplitScope>;
+
+/** 采购申请级展示数据 */
+export interface PurchaseRequestScopeItem {
+  fenbiaoName: string;
+  requestNo: string;
+  materialDescription: string;
+  unit: string;
+  quantity: string;
+}
+
 /** 比例模板 */
 export interface RatioTemplate {
   id: string;
@@ -49,7 +61,12 @@ export interface FenbiaoConfig {
   templateId?: string;
   /** 各包参考金额（精确十进制字符串；取整拆分下会折算为目标包金额并尽量贴近） */
   fixedAmounts?: string[];
+  /** 采购申请级取整/小数覆盖，key = 网省采购申请号 */
+  requestScopeOverrides?: PurchaseRequestScopeOverrides;
 }
+
+/** 行级口径解析器 */
+export type ResolveRowSplitScope = (row: ExcelRow, config?: FenbiaoConfig) => SplitScope;
 
 /** 校验错误 */
 export interface ValidationError {

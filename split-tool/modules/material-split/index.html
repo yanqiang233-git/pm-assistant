@@ -13,6 +13,7 @@
       <a href="#section-import">导入</a>
       <a href="#section-pkg-config">分包配置</a>
       <a href="#section-split-method">拆分方式</a>
+      <a href="#section-request-scope">采购申请级调整</a>
       <a href="#section-template">比例模板</a>
       <a href="#section-preview">预览</a>
       <a href="#section-export">导出</a>
@@ -118,6 +119,33 @@
             <tbody id="splitTableBody"></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <section id="section-request-scope" class="module disabled-module">
+      <div class="module-header">
+        <h2>采购申请级调整</h2>
+        <div class="module-header-actions">
+          <button class="btn btn-sm" id="btnToggleRequestScope">展开</button>
+          <span class="status-badge" id="requestScopeStatus">待配置</span>
+        </div>
+      </div>
+      <div class="module-body">
+          <div id="requestScopeToolbar" class="request-scope-toolbar hidden">
+            <div class="request-scope-toolbar-main">
+              <label for="requestScopeFenbiaoFilter">分标筛选</label>
+              <input id="requestScopeFenbiaoFilter" type="text" placeholder="输入分标名称关键字后筛选" />
+            </div>
+            <div class="request-scope-toolbar-actions">
+              <button class="btn btn-sm" id="btnExpandRequestPanels">展开筛选结果</button>
+              <button class="btn btn-sm" id="btnCollapseRequestPanels">收起全部</button>
+            </div>
+          </div>
+          <div id="requestScopeContent" class="hidden">
+          <div id="requestScopeSummary" class="summary-bar request-scope-summary hidden"></div>
+          <div id="requestScopeEmpty" class="request-scope-empty hidden"></div>
+          <div id="requestScopePanels" class="request-scope-panels"></div>
+          </div>
       </div>
     </section>
 

@@ -48,8 +48,21 @@ export function createFenbiaoConfigs(
     packageCount: 0,
     splitScope: isIntegerDecimalString(exactFenbiaoQtyTotals[name] ?? '0') ? 'rounded' : 'decimal',
     splitMethod: globalMethod,
-    overridden: false
+    overridden: false,
+    requestScopeOverrides: {}
   }));
+}
+
+export function cloneFenbiaoConfig(config: FenbiaoConfig): FenbiaoConfig {
+  return {
+    ...config,
+    fixedAmounts: config.fixedAmounts ? [...config.fixedAmounts] : undefined,
+    requestScopeOverrides: config.requestScopeOverrides ? { ...config.requestScopeOverrides } : {}
+  };
+}
+
+export function cloneFenbiaoConfigs(configs: FenbiaoConfig[]): FenbiaoConfig[] {
+  return configs.map(cloneFenbiaoConfig);
 }
 
 /** 更新全局拆分方式，同步未覆盖的标段 */
